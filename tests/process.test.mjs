@@ -13,6 +13,7 @@ await fs.mkdir(tmp, { recursive: true });
 const tmpReal = await fs.realpath(tmp); // members open the board through its canonical path
 process.env.COPILOT_HOME = path.join(tmp, 'home');
 const { GroveProcess } = await import('../extensions/grove-agent-monitor/lib/process/integration.mjs');
+const { decisionLine, toastText } = await import('../extensions/grove-agent-monitor/web/decision-text.mjs');
 
 const all = [];
 // What \`gh pr view\` returns in these tests.
@@ -156,10 +157,12 @@ function started(chief, eng, prompt) {
 let res;
 // An engineer asks the host which chat it is (get_current_session); Grove learns its own link from that.
 let gcs = 0;
-function whoAmI(s, openLink = s.link) {
+async function whoAmI(s, openLink = s.link) {
   const toolCallId = `gcs-${++gcs}`;
+  s.proc.selfLinkLearned = undefined;
   s.emit({ type: 'tool.execution_start', data: { toolCallId, toolName: 'get_current_session', arguments: {} } });
   s.emit({ type: 'tool.execution_complete', data: { toolCallId, success: true, result: { content: JSON.stringify({ openLink: `${openLink}?view=chat`, workingDirectory: s.session.workingDirectory }) } } });
+  return s.proc.selfLinkLearned;
 }
 let h;
 let told;
@@ -554,7 +557,7 @@ const eng3b = await startSession('eng-3b');
 await eng3b.hooks.onUserPromptSubmitted({ prompt: res.data.handoff.prompt });
 assert.equal(eng3b.proc.role, 'lead');
 assert.equal(chief.proc.leadRoute(chief.proc.engine.task('T3')).link, null, 'the replaced engineer\'s chat is no longer a route');
-whoAmI(eng3b);
+await whoAmI(eng3b);
 assert.equal(eng3b.proc.engine.task('T3').lead.linkSource, 'self', 'the new engineer learns its own chat');
 res = await eng3b.call('grove_next');
 assert.match(res.data.guidance, /You took this task over from another engineer/);
@@ -576,7 +579,9 @@ up = await chief.hooks.onUserPromptSubmitted({ prompt: 'Looks good.' });
 assert.match(up.additionalContext, /### Quill \(T3\) "File issues" \(Awaiting your sign-off\)/);
 assert.match(up.additionalContext, /Engineer's summary: Filed two issues/);
 assert.match(up.additionalContext, /Engineer session: agent-host-session:\/\/ahp-session\/G-eng-3b\n/, 'the current engineer, never the one it replaced');
-assert.deepEqual(await chief.proc.inboxDecide('T3', 'complete'), { task: 'T3', decision: 'approve', outcome: 'done' });
+const decided3 = await chief.proc.inboxDecide('T3', 'complete');
+assert.deepEqual(decided3, { task: 'T3', decision: 'approve', outcome: 'done', applied: false }, 'recorded, not yet applied by the engineer');
+assert.equal(toastText('complete', { id: 'T3', name: 'Quill' }, decided3), 'Quill: Your sign-off is recorded; its engineer applies it next.', 'the toast never claims done before the engineer applies it');
 await sync(chief, eng3b);
 assert.equal(eng3b.proc.engine.task('T3').stage, 'done', 'the engineer applies an inbox decision from the board');
 
@@ -658,7 +663,7 @@ let inbox5 = chief.proc.liveView().process.inbox;
 assert.ok(inbox5.items.some((x) => x.taskId === 'T5'));
 assert.equal(chief.proc.liveView().agents[0].activity, 'waiting', 'the Chief is at the lantern');
 const eng5Sent = eng5.sent.length;
-assert.deepEqual(await chief.proc.inboxDecide('T5', 'shelve'), { task: 'T5', decision: 'shelve', outcome: 'on the shelf' });
+assert.deepEqual(await chief.proc.inboxDecide('T5', 'shelve'), { task: 'T5', decision: 'shelve', outcome: 'on the shelf', applied: false });
 inbox5 = chief.proc.liveView().process.inbox;
 assert.ok(!inbox5.items.some((x) => x.taskId === 'T5'), 'off the inbox right away');
 assert.deepEqual(inbox5.shelf.map((x) => [x.taskId, x.name, x.was, x.summary]), [['T5', 'Sylph', 'Awaiting your sign-off', 'WAU is about 12k this week.']]);
@@ -787,7 +792,7 @@ assert.equal(chief.proc.leadRoute(chief.proc.engine.task('T6')).link, null, 'the
 const pB = (await chief.call('grove_handoff', { taskId: 'T6' })).data.handoff.prompt;
 // A relay the Chief queued before the hand-off still names the old chat: it is refused, and isn't an attempt.
 back = await send(chief, rel.session, rel.message);
-assert.match(back.denied ?? '', /T6 has no engineer to reach right now.*relays decision #2 once the new engineer starts/s);
+assert.match(back.denied ?? '', /T6 has no engineer to reach right now.*a newer hand-off hasn't been claimed yet.*relays decision #2 once its engineer can be reached/s);
 await settle(chief);
 assert.deepEqual([chief.proc.decisionView('T6').state, chief.proc.board.meta.decisionRelays.T6.attempts], ['awaiting-engineer', 0], 'the new generation starts with no attempts, and the refused send adds none');
 started(chief, { link: 'agent-host-session://ahp-session/G-ghost' }, pA);
@@ -939,6 +944,99 @@ assert.deepEqual(chief2.proc.decisionView('T7'), { seq: 1, action: 'note', state
 back = await send(chief2, eng7.link, stale7);
 assert.match(back.denied ?? '', /decision #1 for T7 is already applied; don't send it again/);
 assert.ok(!chief2.sent.some((m) => /grove_handoff for T7/.test(m)));
+
+// 16e. The Chief's hand-off for a stuck decision is conditional: a stale or malformed notice changes nothing,
+//      a cannot-steer rejection is a failed delivery, and Grove only mints a new engineer while the relay
+//      still needs one. The route Grove asked about stays internal.
+res = await chief2.call('grove_create_task', { title: 'Tidy docs', goal: 'Tidy the docs.', kind: 'research', destination: { mode: 'scratch' } });
+const t9 = res.data.task?.id ?? 'T9';
+const h9 = res.data.handoff.prompt;
+await settle(chief2);
+const eng9 = await startSession('eng-9');
+started(chief2, eng9, h9);
+await eng9.hooks.onUserPromptSubmitted({ prompt: h9 });
+for (const [n, a] of [['grove_plan_steps', { steps: [{ kind: 'research', title: 'Tidy' }] }], ['grove_submit', { step: 'S1', output: '## Answer\nThe docs are tidy now.\n\n## How\nRead every page under docs/ and fixed the headings.\n\n## Uncertain\nNothing.' }], ['grove_deliver', { summary: 'The docs are tidied: headings fixed on every page.' }]]) { const r = await eng9.call(n, a); assert.equal(r.ok, true, n + ' ' + JSON.stringify(r.data)); }
+await sync(eng9, chief2);
+await chief2.proc.inboxDecide(t9, 'complete');
+eng9.proc.dispose();
+// The first relay is rejected with cannotSteer: that is a failed delivery, not an accepted one.
+await tick2();
+let rel9 = relayOf(chief2.sent.at(-1));
+assert.equal(rel9.session, eng9.link);
+let tc9 = `relay-9-${++rtc}`;
+chief2.emit({ type: 'tool.execution_start', data: { toolCallId: tc9, toolName: 'send_message', arguments: rel9 } });
+chief2.emit({ type: 'tool.execution_complete', data: { toolCallId: tc9, success: true, result: { content: '{"action":"rejected","cannotSteer":true}' } } });
+await settle(chief2);
+assert.equal(chief2.proc.decisionView(t9).state, 'delivery-failed', 'cannotSteer is not a delivery');
+assert.equal(chief2.proc.board.meta.decisionRelays[t9].attempts, 1);
+for (let i = 0; i < 8 && chief2.proc.decisionView(t9).state !== 'needs-new-engineer'; i++) {
+  await tick2();
+  if (/Send the engineer this message/.test(chief2.sent.at(-1))) {
+    chiefSend(relayOf(chief2.sent.at(-1)), false, chief2, 'Session not found');
+    await settle(chief2);
+  }
+}
+assert.equal(chief2.proc.decisionView(t9).state, 'needs-new-engineer');
+const ask9 = chief2.sent.find((m) => new RegExp(`grove_handoff for ${t9} with forDecision: (\\d+) and forGeneration: (\\d+)`).test(m));
+const [, dSeq, dGen] = new RegExp(`forDecision: (\\d+) and forGeneration: (\\d+)`).exec(ask9).map(Number);
+const relay9 = chief2.proc.board.meta.decisionRelays[t9];
+assert.equal(relay9.askedRoute, eng9.link, 'Grove remembers which route it asked about');
+// askedRoute/askedGen never reach the UI or the Chief's status.
+assert.deepEqual(Object.keys(chief2.proc.decisionView(t9)).filter((k) => /^asked/.test(k)), []);
+assert.doesNotMatch(JSON.stringify(chief2.proc.liveView()), /askedRoute|askedGen/);
+assert.doesNotMatch(JSON.stringify((await chief2.call('grove_status', { taskId: t9 })).data), /askedRoute|askedGen/);
+// Stale and malformed notices change nothing.
+const snap9 = () => JSON.stringify([chief2.proc.board.meta.gen?.[t9], chief2.proc.board.meta.handoffs?.[t9], chief2.proc.board.meta.decisionRelays?.[t9]]);
+const before9 = snap9();
+const handoff9 = (args) => chief2.call('grove_handoff', { taskId: t9, ...args }).then((r) => r.data);
+let hr = await handoff9({ forDecision: 1.5, forGeneration: dGen });
+assert.deepEqual([hr.replaced, hr.stale], [false, true]);
+assert.match(hr.why, /^invalid notice/);
+hr = await handoff9({ forDecision: dSeq });
+assert.match(hr.why, /^invalid notice/, 'both fields or neither');
+hr = await handoff9({ forDecision: 99, forGeneration: dGen });
+assert.deepEqual([hr.replaced, hr.stale, hr.why], [false, true, 'no such decision on this task']);
+hr = await handoff9({ forDecision: dSeq, forGeneration: dGen + 1 });
+assert.deepEqual([hr.replaced, hr.stale, hr.why], [false, true, 'a newer engineer was handed this task after that notice']);
+assert.equal(snap9(), before9, 'stale notices write nothing');
+// The engineer turns up again on a new chat: no new engineer; Grove relays the decision there instead.
+const eng9b = await startSession('eng-9b');
+// (The owner learns its new link with learnSelfLink; the Chief sees it on the task's lead.)
+const relink9 = async (link, linkSource) => {
+  const t = structuredClone(chief2.proc.engine.task(t9));
+  Object.assign(t.lead, { link, linkSource });
+  await chief2.proc.board.saveTask(t);
+  await chief2.proc.board.flush();
+};
+await relink9(eng9b.link, 'self');
+hr = await handoff9({ forDecision: dSeq, forGeneration: dGen });
+assert.deepEqual([hr.replaced, !!hr.stale, hr.why], [false, false, 'the engineer is reachable again; Grove will relay the decision']);
+assert.equal(chief2.proc.decisionView(t9).state, 'recorded');
+assert.equal(chief2.proc.board.meta.decisionRelays[t9].askedRoute, undefined);
+hr = await handoff9({ forDecision: dSeq, forGeneration: dGen });
+assert.deepEqual([hr.replaced, hr.stale, hr.why], [false, true, 'the relay has moved on since that notice'], 'a repeated notice is stale');
+// Back to the unreachable route: the relay exhausts again, and this time the notice mints a new engineer.
+await relink9(eng9.link, 'chief');
+for (let i = 0; i < 8 && chief2.proc.decisionView(t9).state !== 'needs-new-engineer'; i++) {
+  await tick2();
+  if (/Send the engineer this message/.test(chief2.sent.at(-1))) {
+    chiefSend(relayOf(chief2.sent.at(-1)), false, chief2, 'Session not found');
+    await settle(chief2);
+  }
+}
+assert.equal(chief2.proc.decisionView(t9).state, 'needs-new-engineer');
+const gen9 = chief2.proc.board.meta.gen?.[t9] ?? 0;
+hr = await handoff9({ forDecision: dSeq, forGeneration: gen9 });
+assert.equal(hr.replaced, true);
+assert.ok(hr.handoff?.prompt);
+assert.equal(chief2.proc.board.meta.gen[t9], gen9 + 1, 'a new generation');
+assert.equal(chief2.proc.decisionView(t9).state, 'awaiting-engineer');
+// The same notice again is stale: a newer engineer holds it now.
+hr = await handoff9({ forDecision: dSeq, forGeneration: gen9 });
+assert.deepEqual([hr.replaced, hr.stale, hr.why], [false, true, 'a newer engineer was handed this task after that notice']);
+// An engineer only learns its own link when it is the owner holding the current hand-off.
+assert.equal(await eng9b.proc.learnSelfLink(eng9b.link), false, 'not an engineer of this board');
+assert.equal(await eng5.proc.learnSelfLink('not-a-link'), false, 'not an AHP link');
 
 // 17. A board from the earlier process (a task lead with persona sessions) isn't migrated: Grove leaves it
 //     untouched and says to start a new Chief of Staff chat.

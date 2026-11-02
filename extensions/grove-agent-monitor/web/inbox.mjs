@@ -5,6 +5,7 @@
 // tasks set aside for later, which you can bring back.
 import { PALETTE } from './engine/palette.mjs';
 import { drawSprite } from './engine/sprites.mjs';
+import { decisionLine, toastText } from './decision-text.mjs';
 
 function el(tag, props = {}, ...children) {
   const n = document.createElement(tag);
@@ -31,17 +32,6 @@ function ago(ts) {
 
 // The book sprite in the task's colour, drawn at art size and scaled up crisply by CSS.
 const DECISION_PENDING = new Set(['recorded', 'relay-requested', 'delivery-accepted', 'delivery-failed', 'awaiting-engineer', 'needs-new-engineer']);
-
-// Where the human's latest inbox decision has got to, in words. Null once it's applied.
-function decisionLine(d) {
-  if (!d) return null;
-  if (['recorded', 'relay-requested', 'delivery-accepted'].includes(d.state)) return 'Sent to engineer · waiting';
-  if (d.state === 'delivery-failed') return `Retrying delivery (${d.attempts ?? 1})`;
-  if (d.state === 'awaiting-engineer') return 'Waiting for new engineer';
-  if (d.state === 'needs-new-engineer') return 'Engineer not reachable · Chief asked for a new engineer';
-  if (d.state === 'rejected' || d.state === 'superseded') return `Not applied: ${d.reason ?? d.state}`;
-  return null;
-}
 
 function bookIcon(color) {
   const c = el('canvas', { width: '14', height: '16', class: 'book-icon', 'aria-hidden': 'true' });
@@ -155,13 +145,13 @@ export class InboxPanel {
 
   complete(t) {
     return this.act(t.id, 'complete', () => this.api('api/inbox/decide', { taskId: t.id, action: 'complete' }), (out) => {
-      this.onStatus({ done: `${t.name ?? t.id} completed: signed off.`, shipping: `${t.name ?? t.id} approved: the team opens a pull request next.` }[out.outcome] ?? `${t.name ?? t.id}: step accepted; the team carries on.`);
+      this.onStatus(toastText('complete', t, out));
     });
   }
 
   merge(t) {
-    return this.act(t.id, 'merge', () => this.api('api/inbox/decide', { taskId: t.id, action: 'merge' }), () => {
-      this.onStatus(`${t.name ?? t.id}: the team is merging the pull request.`);
+    return this.act(t.id, 'merge', () => this.api('api/inbox/decide', { taskId: t.id, action: 'merge' }), (out) => {
+      this.onStatus(toastText('merge', t, out));
     });
   }
 
@@ -181,7 +171,7 @@ export class InboxPanel {
     }
     clearTimeout(this.confirming.get(t.id));
     this.confirming.delete(t.id);
-    return this.act(t.id, 'dismiss', () => this.api('api/inbox/decide', { taskId: t.id, action: 'dismiss' }), () => this.onStatus(`${t.name ?? t.id} dismissed: the task is cancelled.`));
+    return this.act(t.id, 'dismiss', () => this.api('api/inbox/decide', { taskId: t.id, action: 'dismiss' }), (out) => this.onStatus(toastText('dismiss', t, out)));
   }
 
   buttons(t, { ask, shelved = false, decision = null }) {
@@ -226,7 +216,7 @@ export class InboxPanel {
 
   // One task as a full-width row: its book (the report), what it is and needs, and its actions.
   row({ t, color, kind, report, label, labelClass, meta = [], ask, summary, decision, buttons }) {
-    const line = decisionLine(decision);
+    const line = decisionLine(decision, t);
     const id = t.id;
     return el('li', { class: `row row-${kind}`, style: { '--task': PALETTE[color] ?? PALETTE.uiText } },
       report
