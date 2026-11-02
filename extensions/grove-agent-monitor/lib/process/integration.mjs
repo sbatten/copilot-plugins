@@ -80,7 +80,8 @@ const relayError = (e) => clipText(String(e ?? '').replace(/(agent-host-session:
 const CANNOT_STEER = 'engineer\'s chat is idle; steering isn\'t possible';
 
 // What a relay's send_message actually did. Some hosts report a refused send as a successful tool call
-// whose result says `rejected` (with `cannotSteer` when the target chat is idle); that is not a delivery.
+// whose result says `rejected` (with `reason: "cannotSteer"`, or an older `cannotSteer: true`, when the
+// target chat is idle); that is not a delivery.
 // Shapes Grove doesn't recognise count as accepted, as they always have.
 export function relayOutcome(d) {
   if (!d || d.success === false || wasDenied(d)) {
@@ -97,7 +98,7 @@ export function relayOutcome(d) {
     }
   }
   const flag = flagOf(obj);
-  if (flag === 'rejected' && obj.cannotSteer) return { kind: 'cannot-steer', reason: CANNOT_STEER };
+  if (flag === 'rejected' && (obj.cannotSteer === true || obj.reason === 'cannotSteer')) return { kind: 'cannot-steer', reason: CANNOT_STEER };
   if (flag === 'rejected' || flag === 'error') {
     const why = [obj.reason ?? obj.error ?? obj.message, obj.targetStatus ? `target ${obj.targetStatus}` : null].filter((x) => typeof x === 'string' && x).join('; ');
     return { kind: 'rejected', reason: relayError(why || `send ${flag}`) };
@@ -1102,8 +1103,9 @@ export class GroveProcess {
     const decisions = await this.board.readDecisions(id);
     let result;
     let wrote = false;
+    // Only the Chief writes the meta, so its in-memory copy is current. Re-reading it here would drop
+    // relay changes notifyChief hasn't saved yet.
     await this.board.updateMeta(async () => {
-      await this.board.reloadMeta();
       const meta = this.board.meta;
       const noop = (why, stale = true) => {
         result = { task: id, replaced: false, ...(stale ? { stale: true } : {}), why };
@@ -1316,6 +1318,7 @@ export class GroveProcess {
         try {
           const metadata = typeof d.result?.workingDirectory === 'string' || typeof d.result?.openLink === 'string' ? d.result : JSON.parse(resultText(d.result));
           if (typeof metadata.workingDirectory === 'string') this.metadataDirectory = metadata.workingDirectory;
+          // Learned in the background: it re-reads the board to check the hand-off before changing the task.
           if (typeof metadata.openLink === 'string') this.selfLinkLearned = this.learnSelfLink(metadata.openLink).catch((err) => { this.log(`Grove could not learn this chat's link: ${err.message}`, 'warning'); return false; });
         } catch (err) {
           this.log(`Grove could not read current-session placement metadata: ${err.message}`, 'warning');
@@ -2360,7 +2363,9 @@ export class GroveProcess {
     // The link is learned from this chat's own get_current_session, and only for its current hand-off.
     if (this.engine.owns(task) && !TERMINAL.has(task.stage)) {
       const route = this.leadRoute(task);
-      if (!route.link && !route.handoffPending) {
+      // Asked once per hand-off: repeating it can't help when the host won't give this chat a link.
+      if (!route.link && !route.handoffPending && this.selfLinkAsked !== task.lead?.token) {
+        this.selfLinkAsked = task.lead?.token;
         messages.push({ id: `self-link:${task.id}`, tool: 'get_current_session', purpose: 'let Grove learn this chat\'s link, so the human\'s decisions can reach it' });
         guidance = `Call get_current_session once now (no arguments) so Grove can reach this chat; ${routeGap(route).text}. ${guidance}`;
       }

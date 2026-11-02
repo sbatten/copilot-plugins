@@ -8,6 +8,11 @@ const STEER = "engineer's chat is idle; steering isn't possible";
 const cases = [
   ['failed call', { success: false, error: { message: 'boom' } }, { kind: 'failed', reason: 'boom' }],
   ['denied call', { success: false, result: { content: 'Denied by user' } }, 'failed'],
+  // The shape the diagnosed host actually returns.
+  ['host reason cannotSteer', ok({ action: 'rejected', reason: 'cannotSteer', targetStatus: 'idle' }), { kind: 'cannot-steer', reason: STEER }],
+  ['host reason cannotSteer (JSON)', ok({ content: JSON.stringify({ action: 'rejected', reason: 'cannotSteer', targetStatus: 'idle' }) }), { kind: 'cannot-steer', reason: STEER }],
+  ['host reason cannotSteer (text parts)', ok({ content: [{ type: 'text', text: JSON.stringify({ action: 'rejected', reason: 'cannotSteer' }) }] }), { kind: 'cannot-steer', reason: STEER }],
+  ['cannotSteer false', ok({ action: 'rejected', cannotSteer: false, reason: 'busy' }), { kind: 'rejected', reason: 'busy' }],
   ['structured cannotSteer', ok({ action: 'rejected', cannotSteer: true, targetStatus: 'idle' }), { kind: 'cannot-steer', reason: STEER }],
   ['JSON-string cannotSteer', ok({ content: JSON.stringify({ action: 'rejected', cannotSteer: true }) }), { kind: 'cannot-steer', reason: STEER }],
   ['status cannotSteer', ok({ status: 'rejected', cannotSteer: true }), { kind: 'cannot-steer', reason: STEER }],

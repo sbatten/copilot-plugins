@@ -883,7 +883,7 @@ const t5d = chief.proc.engine.task('T5');
 const { item: shelf5 } = await chief.proc.board.appendDecision('T5', { action: 'shelve', via: 'grove' }, { appliedThrough: t5d.decisionsApplied ?? 0 });
 assert.notEqual(chief.proc.board.meta.decisionRelays?.T5?.seq, shelf5.seq, 'not tracked before the restart');
 await chief.proc.dispose();
-const chief2 = await startSession('chief-1', { restart: chief });
+let chief2 = await startSession('chief-1', { restart: chief });
 assert.equal(chief2.proc.role, 'chief');
 const t8 = chief2.proc.engine.task(t8id);
 assert.deepEqual([t8.stage, t8.decisionsApplied], ['cancelled', 1], 'the restarted Chief applies its own task\'s dismissal');
@@ -1037,6 +1037,261 @@ assert.deepEqual([hr.replaced, hr.stale, hr.why], [false, true, 'a newer enginee
 // An engineer only learns its own link when it is the owner holding the current hand-off.
 assert.equal(await eng9b.proc.learnSelfLink(eng9b.link), false, 'not an engineer of this board');
 assert.equal(await eng5.proc.learnSelfLink('not-a-link'), false, 'not an AHP link');
+
+// 16f. A warm owner applies an inbox dismissal on its own poll: the inbox stops saying "pending", the token
+//      stays, and the canvas walks the team out and strikes the tent.
+const { Cast } = await import('../extensions/grove-agent-monitor/web/scene/actors.mjs');
+let xn = 0;
+async function delivered(title, c = chief2) {
+  res = await c.call('grove_create_task', { title, goal: `${title}.`, kind: 'research', destination: { mode: 'scratch' } });
+  const id = res.data.task;
+  const prompt = res.data.handoff.prompt;
+  await settle(c);
+  const eng = await startSession(`eng-x${++xn}`);
+  started(c, eng, prompt);
+  await eng.hooks.onUserPromptSubmitted({ prompt });
+  for (const [n, a] of [['grove_plan_steps', { steps: [{ kind: 'research', title }] }], ['grove_submit', { step: 'S1', output: `## Answer\n${title}: done.\n\n## How\nRead the sources and checked each one twice.\n\n## Uncertain\nNothing.` }], ['grove_deliver', { summary: `${title}: done, every source checked twice.` }]]) {
+    const r = await eng.call(n, a);
+    assert.equal(r.ok, true, n + ' ' + JSON.stringify(r.data));
+  }
+  await sync(eng, c);
+  return { id, eng, prompt };
+}
+const metaFile = () => path.join(chief2.proc.board.root, 'board.json');
+// Everything a stale notice must leave alone: the owner, its token and generation, routes, the relay and the
+// meta file's bytes.
+const frozen = async (id) => {
+  await settle(chief2);
+  const m = chief2.proc.board.meta;
+  const t = (await chief2.proc.board.readTasks()).find((x) => x.id === id);
+  return JSON.stringify({ lead: t.lead, gen: m.gen?.[id], handoff: m.handoffs?.[id], route: m.leadRoutes?.[id] ?? null, relay: m.decisionRelays?.[id] ?? null, bytes: await fs.readFile(metaFile(), 'utf8') });
+};
+const runCast = (cast, ticks) => { for (let i = 0; i < ticks; i++) cast.update(1); };
+const w = await delivered('Sort stars');
+assert.equal(chief2.proc.leadRoute(chief2.proc.engine.task(w.id)).link, w.eng.link, 'the route is learned');
+const cast = new Cast();
+cast.sync(chief2.proc.liveView().agents, null);
+runCast(cast, 50);
+const team = [...cast.actors.values()].filter((a) => a.agent.taskId === w.id).map((a) => a.id);
+assert.ok(team.length, 'the engineer is on the canvas');
+assert.ok(cast.tents.has(w.id), 'with its tent');
+const tokW = chief2.proc.board.meta.handoffs[w.id];
+const appliedW = chief2.proc.engine.task(w.id).decisionsApplied ?? 0;
+const outW = await chief2.proc.inboxDecide(w.id, 'dismiss');
+assert.equal(outW.applied, false, 'the engineer owns it: recorded, not applied yet');
+assert.match(toastText('dismiss', chief2.proc.engine.task(w.id), outW), /recorded; its engineer applies it next/);
+await sync(w.eng, chief2);
+await chief2.proc.engine.refresh();
+await chief2.proc.relayToChief();
+await settle(chief2);
+const tW = chief2.proc.engine.task(w.id);
+assert.deepEqual([tW.stage, tW.decisionsApplied], ['cancelled', appliedW + 1], 'the owner applied it once');
+assert.equal(chief2.proc.decisionView(w.id).state, 'applied');
+assert.equal(decisionLine(chief2.proc.decisionView(w.id), tW), null, 'nothing pending in the inbox');
+assert.ok(!chief2.proc.liveView().process.inbox.items.some((i) => i.taskId === w.id), 'and it left the inbox');
+assert.equal(chief2.proc.board.meta.handoffs[w.id], tokW, 'the token is unchanged');
+cast.sync(chief2.proc.liveView().agents, null);
+for (let i = 0; i < 40 && (team.some((a) => cast.actors.has(a)) || cast.tents.has(w.id)); i++) runCast(cast, 100);
+assert.ok(!team.some((a) => cast.actors.has(a)), 'the team walked out');
+assert.ok(!cast.tents.has(w.id), 'and the tent was struck');
+
+// 16g. The Chief restarts in the middle of a relay: the half-finished send is forgotten safely, and the
+//      decision still lands exactly once.
+const rs = await delivered('Count moths');
+await chief2.proc.inboxDecide(rs.id, 'complete');
+const appliedR = chief2.proc.engine.task(rs.id).decisionsApplied ?? 0;
+await tick2();
+const relR = relayOf(chief2.sent.at(-1));
+assert.equal(relR.session, rs.eng.link);
+chiefSend(relR, undefined, chief2); // started, never finished
+await settle(chief2);
+await chief2.proc.dispose();
+chief2 = await startSession('chief-1', { restart: chief2 });
+chief2.proc.now = () => clock;
+assert.equal(chief2.proc.role, 'chief');
+assert.equal(chief2.proc.engine.task(rs.id).decisionsApplied ?? 0, appliedR, 'not applied by the restart');
+await sync(rs.eng, chief2);
+for (let i = 0; i < 3; i++) await tick2();
+assert.equal(rs.eng.proc.engine.task(rs.id).decisionsApplied, appliedR + 1, 'the owner applied it once');
+assert.equal(chief2.proc.engine.task(rs.id).decisionsApplied, appliedR + 1);
+assert.equal(chief2.proc.decisionView(rs.id).state, 'applied');
+const sentR = chief2.sent.length;
+for (let i = 0; i < 3; i++) await tick2();
+assert.ok(!chief2.sent.slice(sentR).some((m) => m.includes(rs.id)), 'nothing more is relayed');
+
+// 16h. Rebinding and stale notices. A route-less owner is told to call get_current_session and relearns its
+//      own link from it (only while it holds the current hand-off). A notice that has gone stale (its
+//      decision applied or rejected, a newer engineer, a newer decision) changes nothing at all. Cannot-steer
+//      rejections back off like any failed send. Identical inbox clicks merge; distinct chat cancels don't.
+const qHandoff = (id, args) => chief2.call('grove_handoff', { taskId: id, ...args }).then((x) => x.data);
+const qSendReq = () => chief2.sent.filter((m) => /Send the engineer this message/.test(m)).length;
+// Fail every relay until Grove asks the Chief for a new engineer; returns the decision and generation it named.
+async function qExhaust(id) {
+  for (let i = 0; i < 12 && chief2.proc.decisionView(id).state !== 'needs-new-engineer'; i++) {
+    const n = qSendReq();
+    await tick2();
+    if (qSendReq() > n) {
+      chiefSend(relayOf(chief2.sent.at(-1)), false, chief2, 'Session not found');
+      await settle(chief2);
+    }
+  }
+  assert.equal(chief2.proc.decisionView(id).state, 'needs-new-engineer');
+  const ask = chief2.sent.findLast((m) => new RegExp(`grove_handoff for ${id} with forDecision: \\d+ and forGeneration: \\d+`).test(m));
+  const [, seq, gen] = /forDecision: (\d+) and forGeneration: (\d+)/.exec(ask).map(Number);
+  return { seq, gen };
+}
+const qApply = async (x) => {
+  await sync(x.eng, chief2);
+  await chief2.proc.engine.refresh();
+  await chief2.proc.relayToChief();
+  await settle(chief2);
+};
+
+// Self-rebind: the owner's route is gone (its link quarantined, the Chief's route dropped).
+const qa = await delivered('Map ferns');
+const qTokA = chief2.proc.board.meta.handoffs[qa.id];
+await chief2.proc.board.updateMeta((m) => {
+  if (m.leadRoutes) delete m.leadRoutes[qa.id];
+  if (m.leadLinks) delete m.leadLinks[qa.id];
+});
+await settle(chief2);
+const qta = qa.eng.proc.engine.task(qa.id);
+qta.lead.link = 'agent-host-session://ahp-session/G-ghost-a';
+delete qta.lead.linkSource;
+qa.eng.proc.engine.changed(qta, null);
+await settle(qa.eng);
+await chief2.proc.engine.refresh();
+let qr = chief2.proc.leadRoute(chief2.proc.engine.task(qa.id));
+assert.deepEqual([qr.link, qr.quarantined, qr.handoffPending], [null, true, false], 'no route to the owner');
+let qn = (await qa.eng.call('grove_next')).data;
+assert.ok(qn.messages.some((m) => m.tool === 'get_current_session'), 'the owner is asked to rebind');
+assert.match(qn.guidance, /^Call get_current_session once now/);
+qn = (await qa.eng.call('grove_next')).data;
+assert.ok(!(qn.messages ?? []).some((m) => m.tool === 'get_current_session'), 'asked once per hand-off, not on every call');
+assert.equal(qa.eng.proc.engine.task(qa.id).lead.link, undefined, 'the unverifiable link was dropped');
+assert.equal(await whoAmI(qa.eng), true, 'learned from its own get_current_session');
+assert.deepEqual([qta.lead.link, qta.lead.linkSource], [qa.eng.link, 'self']);
+assert.equal(await whoAmI(qa.eng), false, 'learned once');
+await settle(qa.eng);
+await chief2.proc.engine.refresh();
+assert.equal(chief2.proc.leadRoute(chief2.proc.engine.task(qa.id)).link, qa.eng.link, 'the Chief can reach it again');
+qn = (await qa.eng.call('grove_next')).data;
+assert.ok(!(qn.messages ?? []).some((m) => m.tool === 'get_current_session'), 'and it is not asked again');
+// Someone who isn't the owner can't bind the route to itself.
+const qOther = await startSession('eng-q-other');
+assert.notEqual(await whoAmI(qOther), true, 'a chat that holds no hand-off learns nothing');
+// The decision now relays to the rebound chat and lands once; the token never changed.
+const qAppliedA = chief2.proc.engine.task(qa.id).decisionsApplied ?? 0;
+await chief2.proc.inboxDecide(qa.id, 'complete');
+for (let i = 0; i < 3 && !/Send the engineer this message/.test(chief2.sent.at(-1)); i++) await tick2();
+const qrel = relayOf(chief2.sent.at(-1));
+assert.equal(qrel.session, qa.eng.link, 'relayed to the self-learned link');
+chiefSend(qrel, true, chief2);
+await settle(chief2);
+assert.equal(chief2.proc.decisionView(qa.id).state, 'delivery-accepted');
+await qApply(qa);
+assert.deepEqual([chief2.proc.engine.task(qa.id).stage, chief2.proc.engine.task(qa.id).decisionsApplied], ['done', qAppliedA + 1]);
+assert.equal(chief2.proc.decisionView(qa.id).state, 'applied');
+assert.equal(chief2.proc.board.meta.handoffs[qa.id], qTokA, 'the token is unchanged');
+
+// c1: the decision is applied after the Chief was asked for a new engineer; the notice changes nothing.
+const qc = await delivered('Weigh seeds');
+await chief2.proc.inboxDecide(qc.id, 'complete');
+const qcN = await qExhaust(qc.id);
+await qApply(qc);
+assert.equal(chief2.proc.decisionView(qc.id).state, 'applied');
+let qBefore = await frozen(qc.id);
+hr = await qHandoff(qc.id, { forDecision: qcN.seq, forGeneration: qcN.gen });
+assert.deepEqual([hr.replaced, hr.stale, hr.why], [false, undefined, `decision #${qcN.seq} was already applied`]);
+assert.equal(hr.handoff, undefined, 'no hand-off to start');
+assert.equal(await frozen(qc.id), qBefore, 'owner, token, generation, routes, relay and the board file are untouched');
+
+// c1b + distinct cancels: two chat cancels are two decisions; the second is rejected (the task is already cancelled),
+// which the inbox reports as not applied, and its notice changes nothing.
+const qd = await delivered('Press leaves');
+const qdDecs = (await chief2.proc.board.readDecisions(qd.id)).length;
+for (let i = 0; i < 2; i++) {
+  res = await chief2.call('grove_record_decision', { taskId: qd.id, decision: 'cancel' });
+  assert.equal(res.ok, true, JSON.stringify(res.data));
+}
+const qdItems = (await chief2.proc.board.readDecisions(qd.id)).slice(qdDecs);
+assert.deepEqual(qdItems.map((d) => [d.action, d.via]), [['cancel', 'chat'], ['cancel', 'chat']], 'chat decisions always append');
+const qdN = await qExhaust(qd.id);
+assert.equal(qdN.seq, qdItems[1].seq, 'the relay follows the latest decision');
+await qApply(qd);
+const qtd = chief2.proc.engine.task(qd.id);
+assert.deepEqual([qtd.stage, chief2.proc.engine.decisionResult(qtd, qdItems[0].seq).result, chief2.proc.engine.decisionResult(qtd, qdItems[1].seq).result], ['cancelled', 'applied', 'rejected']);
+assert.match(chief2.proc.engine.decisionResult(qtd, qdItems[1].seq).reason, new RegExp(`${qd.id} is cancelled`));
+assert.equal(chief2.proc.decisionView(qd.id).state, 'rejected');
+assert.equal(decisionLine(chief2.proc.decisionView(qd.id), qtd), `Not applied: ${qd.id} is cancelled.`, 'the inbox says why, not that it is pending');
+qBefore = await frozen(qd.id);
+hr = await qHandoff(qd.id, { forDecision: qdN.seq, forGeneration: qdN.gen });
+assert.deepEqual([hr.replaced, hr.stale, hr.why], [false, undefined, `decision #${qdN.seq} was already rejected`]);
+assert.equal(await frozen(qd.id), qBefore);
+
+// c5 + identical clicks: a double click in the inbox records one decision. Then the Chief hands the task to
+// a new engineer by itself; the older notice is stale, and the old chat can't take the route back.
+const qe = await delivered('Sweep paths');
+const qe1 = await chief2.proc.inboxDecide(qe.id, 'dismiss');
+const qe2 = await chief2.proc.inboxDecide(qe.id, 'dismiss');
+assert.deepEqual([qe1.duplicate, qe2.duplicate], [undefined, true], 'identical clicks merge');
+assert.equal((await chief2.proc.board.readDecisions(qe.id)).filter((d) => d.action === 'cancel').length, 1);
+const qeN = await qExhaust(qe.id);
+res = await chief2.call('grove_handoff', { taskId: qe.id });
+assert.equal(res.ok, true, JSON.stringify(res.data));
+const qeH = res.data.handoff.prompt;
+await settle(chief2);
+qBefore = await frozen(qe.id);
+hr = await qHandoff(qe.id, { forDecision: qeN.seq, forGeneration: qeN.gen });
+assert.deepEqual([hr.replaced, hr.stale, hr.why], [false, true, 'a newer engineer was handed this task after that notice']);
+assert.equal(await frozen(qe.id), qBefore);
+const qeNew = await startSession('eng-q-new');
+started(chief2, qeNew, qeH);
+await qeNew.hooks.onUserPromptSubmitted({ prompt: qeH });
+await settle(qeNew, chief2);
+assert.equal(await whoAmI(qe.eng), false, 'the old engineer no longer holds the hand-off');
+await qApply({ eng: qeNew });
+assert.equal(chief2.proc.engine.task(qe.id).stage, 'cancelled', 'the new engineer applies the dismissal');
+
+// c5b: a newer decision after the notice replaces it.
+const qf = await delivered('Light lamps');
+await chief2.proc.inboxDecide(qf.id, 'complete');
+const qfN = await qExhaust(qf.id);
+res = await chief2.call('grove_record_decision', { taskId: qf.id, decision: 'note', note: 'Also count the moths.' });
+assert.equal(res.ok, true, JSON.stringify(res.data));
+qBefore = await frozen(qf.id);
+hr = await qHandoff(qf.id, { forDecision: qfN.seq, forGeneration: qfN.gen });
+assert.deepEqual([hr.replaced, hr.stale, hr.why], [false, true, 'a newer decision replaced that notice']);
+assert.equal(await frozen(qf.id), qBefore);
+await qApply(qf);
+
+// Repeated cannot-steer rejections are failed sends with the usual backoff: no new request before it's due.
+const qg = await delivered('Wind clocks');
+await chief2.proc.inboxDecide(qg.id, 'complete');
+for (let n = 1; n <= 2; n++) {
+  const before = qSendReq();
+  for (let i = 0; i < 3 && qSendReq() === before; i++) await tick2();
+  assert.equal(qSendReq(), before + 1, 'one request when due');
+  const rel = relayOf(chief2.sent.at(-1));
+  const id = `relay-q-${++rtc}`;
+  chief2.emit({ type: 'tool.execution_start', data: { toolCallId: id, toolName: 'send_message', arguments: rel } });
+  chief2.emit({ type: 'tool.execution_complete', data: { toolCallId: id, success: true, result: { content: '{"action":"rejected","reason":"cannotSteer"}' } } });
+  await settle(chief2);
+  const relay = chief2.proc.board.meta.decisionRelays[qg.id];
+  assert.deepEqual([relay.state, relay.attempts, relay.lastError], ['delivery-failed', n, "engineer's chat is idle; steering isn't possible"], `rejection ${n} is a failed send`);
+  assert.equal(relay.nextAt, clock + chief2.proc.relayDelay(n), 'backed off by attempts');
+  clock += MIN;
+  await chief2.proc.relayToChief();
+  await settle(chief2);
+  assert.equal(qSendReq(), before + 1, 'nothing more before it is due');
+}
+for (let i = 0; i < 3 && chief2.proc.decisionView(qg.id).state === 'delivery-failed'; i++) await tick2();
+chiefSend(relayOf(chief2.sent.at(-1)), true, chief2);
+await settle(chief2);
+assert.equal(chief2.proc.decisionView(qg.id).state, 'delivery-accepted', 'a later send is accepted');
+assert.equal(chief2.proc.board.meta.decisionRelays[qg.id].lastError, undefined);
+await qApply(qg);
+assert.equal(chief2.proc.decisionView(qg.id).state, 'applied');
 
 // 17. A board from the earlier process (a task lead with persona sessions) isn't migrated: Grove leaves it
 //     untouched and says to start a new Chief of Staff chat.
