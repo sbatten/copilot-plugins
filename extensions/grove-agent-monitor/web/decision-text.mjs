@@ -2,9 +2,16 @@
 
 // Where the human's latest decision has got to, in words. Null once it's applied, or when there's nothing
 // worth saying (a dismissal that lost a race with an earlier cancel: the task is cancelled either way).
+// The engine rejects a decision on a cancelled task with "<id> is cancelled." (engine.decisionError).
+function lostCancelRace(d, task) {
+  if (!['cancel', 'dismiss'].includes(d.action) || d.state !== 'rejected' || task?.stage !== 'cancelled') return false;
+  const reason = String(d.reason ?? '').trim();
+  return reason === `${task.id} is cancelled.` || /already cancelled/i.test(reason);
+}
+
 export function decisionLine(d, task) {
   if (!d) return null;
-  if (['cancel', 'dismiss'].includes(d.action) && d.state === 'rejected' && task?.stage === 'cancelled' && /already cancelled/i.test(d.reason ?? '')) return null;
+  if (lostCancelRace(d, task)) return null;
   switch (d.state) {
     case 'recorded': return 'Recorded · waiting for engineer';
     case 'relay-requested': return 'Recorded · Chief relaying to engineer';

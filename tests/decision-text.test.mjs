@@ -27,6 +27,14 @@ assert.equal(decisionLine({ ...lostRace, action: 'dismiss' }, cancelled), null);
 assert.equal(decisionLine(lostRace, live), 'Not applied: T1 is already cancelled.', 'task not cancelled: keep it visible');
 assert.equal(decisionLine({ ...lostRace, reason: 'T1 is done.' }, cancelled), 'Not applied: T1 is done.', 'another reason stays visible');
 assert.equal(decisionLine({ ...lostRace, action: 'approve' }, cancelled), 'Not applied: T1 is already cancelled.', 'only cancels are suppressed');
+// The engine's own wording for a decision on a cancelled task (engine.decisionError).
+const engineLost = { action: 'cancel', state: 'rejected', reason: 'T1 is cancelled.' };
+assert.equal(decisionLine(engineLost, cancelled), null, "the engine's canonical reason is suppressed");
+assert.equal(decisionLine({ ...engineLost, action: 'dismiss' }, cancelled), null);
+assert.equal(decisionLine(engineLost, live), 'Not applied: T1 is cancelled.', 'task not cancelled: keep it visible');
+assert.equal(decisionLine({ ...engineLost, action: 'approve' }, cancelled), 'Not applied: T1 is cancelled.', 'a non-cancel rejection stays visible');
+assert.equal(decisionLine({ ...engineLost, reason: 'T2 is cancelled.' }, cancelled), 'Not applied: T2 is cancelled.', 'another task\'s reason stays visible');
+assert.equal(decisionLine({ ...engineLost, state: 'superseded' }, cancelled), 'Not applied: T1 is cancelled.', 'only rejections are suppressed');
 
 // Toasts: applied results say what happened; anything else is "recorded".
 assert.equal(toastText('complete', live, { applied: true, outcome: 'done' }), 'Quill completed: signed off.');

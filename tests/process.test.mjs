@@ -1207,7 +1207,7 @@ assert.equal(hr.handoff, undefined, 'no hand-off to start');
 assert.equal(await frozen(qc.id), qBefore, 'owner, token, generation, routes, relay and the board file are untouched');
 
 // c1b + distinct cancels: two chat cancels are two decisions; the second is rejected (the task is already cancelled),
-// which the inbox reports as not applied, and its notice changes nothing.
+// which the inbox doesn't show (the task is cancelled either way), and its notice changes nothing.
 const qd = await delivered('Press leaves');
 const qdDecs = (await chief2.proc.board.readDecisions(qd.id)).length;
 for (let i = 0; i < 2; i++) {
@@ -1223,7 +1223,7 @@ const qtd = chief2.proc.engine.task(qd.id);
 assert.deepEqual([qtd.stage, chief2.proc.engine.decisionResult(qtd, qdItems[0].seq).result, chief2.proc.engine.decisionResult(qtd, qdItems[1].seq).result], ['cancelled', 'applied', 'rejected']);
 assert.match(chief2.proc.engine.decisionResult(qtd, qdItems[1].seq).reason, new RegExp(`${qd.id} is cancelled`));
 assert.equal(chief2.proc.decisionView(qd.id).state, 'rejected');
-assert.equal(decisionLine(chief2.proc.decisionView(qd.id), qtd), `Not applied: ${qd.id} is cancelled.`, 'the inbox says why, not that it is pending');
+assert.equal(decisionLine(chief2.proc.decisionView(qd.id), qtd), null, 'the losing cancel is not shown as a failure');
 qBefore = await frozen(qd.id);
 hr = await qHandoff(qd.id, { forDecision: qdN.seq, forGeneration: qdN.gen });
 assert.deepEqual([hr.replaced, hr.stale, hr.why], [false, undefined, `decision #${qdN.seq} was already rejected`]);
@@ -1250,6 +1250,15 @@ started(chief2, qeNew, qeH);
 await qeNew.hooks.onUserPromptSubmitted({ prompt: qeH });
 await settle(qeNew, chief2);
 assert.equal(await whoAmI(qe.eng), false, 'the old engineer no longer holds the hand-off');
+assert.equal(await whoAmI(qeNew), true, 'the new engineer holds it');
+// Replayed again once the new engineer has claimed (its claim applies the dismissal): its ownership, token,
+// route, generation and relay stay put.
+qBefore = await frozen(qe.id);
+hr = await qHandoff(qe.id, { forDecision: qeN.seq, forGeneration: qeN.gen });
+assert.deepEqual([hr.replaced, hr.why], [false, `decision #${qeN.seq} was already applied`]);
+assert.equal(hr.handoff, undefined, 'no hand-off to start');
+assert.equal(await frozen(qe.id), qBefore, 'the claimed owner is untouched');
+assert.equal(chief2.proc.engine.task(qe.id).stage, 'cancelled', 'the claim applied the dismissal');
 await qApply({ eng: qeNew });
 assert.equal(chief2.proc.engine.task(qe.id).stage, 'cancelled', 'the new engineer applies the dismissal');
 
