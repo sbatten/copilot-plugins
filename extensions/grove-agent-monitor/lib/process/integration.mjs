@@ -77,6 +77,41 @@ const RELAY_MIN_ATTEMPTS = 3;
 const DECISION_REF = /^(T\d{1,6}):(\d{1,9})$/;
 // Errors shown to the human: one short line, with no link query strings.
 const relayError = (e) => clipText(String(e ?? '').replace(/(agent-host-session:\/\/[^\s?"']*)\?[^\s"']*/g, '$1').replace(/\s+/g, ' ').trim() || 'send failed', 160);
+const CANNOT_STEER = 'engineer\'s chat is idle; steering isn\'t possible';
+
+// What a relay's send_message actually did. Some hosts report a refused send as a successful tool call
+// whose result says `rejected` (with `reason: "cannotSteer"`, or an older `cannotSteer: true`, when the
+// target chat is idle); that is not a delivery.
+// Shapes Grove doesn't recognise count as accepted, as they always have.
+export function relayOutcome(d) {
+  if (!d || d.success === false || wasDenied(d)) {
+    return { kind: 'failed', reason: relayError(d?.error?.message || (d?.result ? resultText(d.result) : '')) };
+  }
+  const flagOf = (o) => (o && typeof o === 'object' && !Array.isArray(o) ? o.action ?? o.status : undefined);
+  let obj = flagOf(d.result) !== undefined ? d.result : null;
+  if (!obj) {
+    try {
+      const parsed = JSON.parse(resultText(d.result));
+      if (flagOf(parsed) !== undefined) obj = parsed;
+    } catch {
+      obj = null;
+    }
+  }
+  const flag = flagOf(obj);
+  if (flag === 'rejected' && (obj.cannotSteer === true || obj.reason === 'cannotSteer')) return { kind: 'cannot-steer', reason: CANNOT_STEER };
+  if (flag === 'rejected' || flag === 'error') {
+    const why = [obj.reason ?? obj.error ?? obj.message, obj.targetStatus ? `target ${obj.targetStatus}` : null].filter((x) => typeof x === 'string' && x).join('; ');
+    return { kind: 'rejected', reason: relayError(why || `send ${flag}`) };
+  }
+  return { kind: 'accepted', reason: null };
+}
+
+// Why Grove has no usable link to a task's engineer, in fixed words (no ids or links).
+export function routeGap(route) {
+  if (route?.handoffPending) return { gap: 'handoff-pending', text: 'a newer hand-off hasn\'t been claimed yet' };
+  if (route?.quarantined) return { gap: 'quarantined', text: 'its stored link couldn\'t be verified, and the engineer hasn\'t relearned it' };
+  return { gap: 'unlearned', text: 'Grove hasn\'t learned a confirmed link to its chat' };
+}
 
 // What a decision does to the task, in a few words.
 function decisionOutcome(t, before, decision, ship) {
@@ -657,7 +692,8 @@ export class GroveProcess {
     }
     const task = this.engine.state.tasks.find((x) => x.id === taskId);
     if (!task) return undefined;
-    const { link } = this.leadRoute(task);
+    const route = this.leadRoute(task);
+    const { link } = route;
     const target = String(args?.session ?? '').split('?')[0];
     if (link && link === target) return undefined;
     // Re-target now rather than after the backoff: the next tick asks the Chief again with the current link.
@@ -671,7 +707,7 @@ export class GroveProcess {
     }
     return deny(link
       ? `Grove: ${target || 'that chat'} is no longer ${taskId}'s engineer. Don't send this; Grove relays decision #${seq} to the current engineer (${link}) itself.`
-      : `Grove: ${taskId} has no engineer to reach right now (a newer hand-off hasn't been claimed). Don't send this; Grove relays decision #${seq} once the new engineer starts.`);
+      : `Grove: ${taskId} has no engineer to reach right now (${routeGap(route).text}). Don't send this; Grove relays decision #${seq} once its engineer can be reached.`);
   }
 
   // The current engineer's chat for a task, with fresh board state. Only the Chief writes the meta, so its
@@ -716,15 +752,25 @@ export class GroveProcess {
     }
   }
 
-  // Engineer: get_current_session named this chat.
-  learnSelfLink(openLink) {
+  // Engineer: get_current_session named this chat. Learned only while this engineer still holds the board's
+  // current hand-off (re-read from disk); if the board can't be read or a newer hand-off exists, nothing is.
+  async learnSelfLink(openLink) {
     const task = this.leadTask();
     const base = String(openLink ?? '').split('?')[0];
-    if (!task?.lead || !this.engine.owns(task) || !isSessionLink(base)) return;
-    if (task.lead.link === base && task.lead.linkSource === 'self') return;
+    if (!task?.lead || !this.engine.owns(task) || !isSessionLink(base)) return false;
+    let meta;
+    try {
+      meta = await this.board.reloadMeta();
+    } catch (err) {
+      this.log(`Grove could not check this chat's hand-off before learning its link: ${err.message}`, 'warning');
+      return false;
+    }
+    if (!task.lead.token || meta.handoffs?.[task.id] !== task.lead.token || !this.engine.owns(task)) return false;
+    if (task.lead.link === base && task.lead.linkSource === 'self') return false;
     task.lead.link = base;
     task.lead.linkSource = 'self';
     this.engine.changed(task, null);
+    return true;
   }
 
   // Chief: a new hand-off (or a new task) starts a new route generation. The previous engineer's links stop
@@ -736,7 +782,9 @@ export class GroveProcess {
     if (meta.leadLinks) delete meta.leadLinks[id];
     const relay = meta.decisionRelays?.[id];
     if (relay && !RELAY_FINAL.has(relay.state)) {
-      meta.decisionRelays[id] = { ...relay, generation: meta.gen[id], attempt: 0, attempts: 0, requests: 0, wakeFailures: 0, sentAttempt: undefined, state: 'awaiting-engineer', since: now, nextAt: now + this.graceMs, lastError: undefined };
+      meta.decisionRelays[id] = { ...relay, generation: meta.gen[id], attempt: 0, attempts: 0, requests: 0, wakeFailures: 0, sentAttempt: undefined, state: 'awaiting-engineer', since: now, nextAt: now + this.graceMs, lastError: undefined, reason: undefined };
+      delete meta.decisionRelays[id].askedGen;
+      delete meta.decisionRelays[id].askedRoute;
     }
   }
 
@@ -898,7 +946,10 @@ export class GroveProcess {
       const relay = s.relay && this.board.meta.decisionRelays?.[s.relay];
       if (relay) {
         relay.wakeFailures = (relay.wakeFailures ?? 0) + 1;
-        if (s.asked) delete relay.askedGen;
+        if (s.asked) {
+          delete relay.askedGen;
+          delete relay.askedRoute;
+        }
         relay.lastError = 'could not post to the Chief\'s chat';
       }
     }
@@ -933,18 +984,24 @@ export class GroveProcess {
       const route = this.leadRoute(t);
       const exhausted = (relay.attempts ?? 0) >= RELAY_MIN_ATTEMPTS && now - relay.since >= RELAY_MAX_DELAY_MS;
       if (route.handoffPending) {
-        set(relay, 'awaiting-engineer');
+        set(relay, 'awaiting-engineer', relay.reason === routeGap(route).text ? {} : { reason: routeGap(route).text });
         continue;
       }
       if (!route.link || exhausted) {
-        set(relay, 'needs-new-engineer');
+        const why = route.link ? `${relay.attempts} relays haven't reached it${relay.lastError ? ` (last error: ${relay.lastError})` : ''}` : routeGap(route).text;
+        set(relay, 'needs-new-engineer', relay.reason === why ? {} : { reason: why });
         if (relay.askedGen !== relay.generation) {
           relay.askedGen = relay.generation;
+          // The link (if any) the Chief was asked about: grove_handoff treats a different one as a recovery.
+          relay.askedRoute = route.link ? route.link.split('?')[0] : null;
           changed = true;
-          const why = route.link ? `${relay.attempts} relays haven't reached it${relay.lastError ? ` (last error: ${relay.lastError})` : ''}` : 'Grove has no confirmed link to its chat';
-          sends.push({ id: null, relay: taskId, asked: true, text: `[Grove → Chief of Staff] ${taskLabel(t)} "${t.title}": the human's decision (#${relay.seq}, "${relay.action}") hasn't reached its engineer: ${why}. Call grove_handoff for ${t.id} and start a new engineer with create_session using the returned fields; it applies the decision from the board. Then tell the human in one line and end your turn.` });
+          sends.push({ id: null, relay: taskId, asked: true, text: `[Grove → Chief of Staff] ${taskLabel(t)} "${t.title}": the human's decision (#${relay.seq}, "${relay.action}") hasn't reached its engineer: ${why}. Call grove_handoff for ${t.id} with forDecision: ${relay.seq} and forGeneration: ${relay.generation}, and start a new engineer with create_session using the returned fields. If it answers replaced:false, don't start anyone: tell the human its \`why\` in one line and end your turn. Otherwise the new engineer applies the decision from the board; tell the human in one line and end your turn.` });
         }
         continue;
+      }
+      if (relay.reason !== undefined) {
+        delete relay.reason;
+        changed = true;
       }
       const item = (await this.board.readDecisions(taskId)).find((d) => d.seq === relay.seq);
       if (!item) continue;
@@ -1015,26 +1072,78 @@ export class GroveProcess {
   // Chief: its send_message for a decision relay finished. The result is recorded only if it's for the relay's
   // current attempt, under the current hand-off, sent to the engineer's current chat; anything else is late.
   relaySent(call, d) {
-    const ok = d.success !== false && !wasDenied(d);
-    const error = ok ? null : d.error?.message || (d.result ? resultText(d.result) : '');
+    const outcome = relayOutcome(d);
     return this.board.updateMeta((meta) => {
       const relay = meta.decisionRelays?.[call.taskId];
       const t = this.engine.state.tasks.find((x) => x.id === call.taskId);
       if (!relay || !t || RELAY_FINAL.has(relay.state)) return false;
       if (relay.seq !== call.seq || relay.generation !== call.generation || relay.attempt !== call.attempt) return false;
       if (this.leadRoute(t, meta).link !== call.target) return false;
-      if (ok) {
+      delete relay.reason;
+      if (outcome.kind === 'accepted') {
         relay.state = 'delivery-accepted';
         delete relay.lastError;
       } else {
         relay.state = 'delivery-failed';
-        relay.lastError = relayError(error);
+        relay.lastError = outcome.reason;
       }
       relay.nextAt = this.now() + this.relayDelay(relay.attempts);
       return true;
     }).then((out) => {
       if (out) this.onChange();
     });
+  }
+
+  // Chief: grove_handoff for a needs-new-engineer notice. Everything is rechecked on fresh state: a notice made
+  // obsolete by a newer engineer, a newer decision or a recovered route changes nothing. Only an engineer
+  // still unreachable for that same decision and generation is replaced.
+  async conditionalHandoff(id, intent, forDecision, forGeneration) {
+    await this.engine.refresh();
+    const t = this.engine.task(id);
+    const decisions = await this.board.readDecisions(id);
+    let result;
+    let wrote = false;
+    // Only the Chief writes the meta, so its in-memory copy is current. Re-reading it here would drop
+    // relay changes notifyChief hasn't saved yet.
+    await this.board.updateMeta(async () => {
+      const meta = this.board.meta;
+      const noop = (why, stale = true) => {
+        result = { task: id, replaced: false, ...(stale ? { stale: true } : {}), why };
+        return false;
+      };
+      if (!decisions.some((d) => d.seq === forDecision)) return noop('no such decision on this task');
+      const relay = meta.decisionRelays?.[id];
+      if ((t.decisionsApplied ?? 0) >= forDecision) {
+        const r = this.engine.decisionResult(t, forDecision)?.result;
+        return noop(`decision #${forDecision} was already ${r === 'rejected' ? 'rejected' : 'applied'}`, false);
+      }
+      if (relay?.seq === forDecision && RELAY_FINAL.has(relay.state)) return noop(`decision #${forDecision} was already ${relay.state}`, false);
+      if (TERMINAL.has(t.stage)) return noop(`the task is already ${t.stage}`, false);
+      if (forGeneration !== (meta.gen?.[id] ?? 0)) return noop('a newer engineer was handed this task after that notice');
+      if (!relay || relay.seq !== forDecision) return noop('a newer decision replaced that notice');
+      if (relay.state !== 'needs-new-engineer' || relay.askedGen !== forGeneration) return noop('the relay has moved on since that notice');
+      const route = this.leadRoute(t, meta);
+      if (route.link && !route.quarantined && !route.handoffPending && route.link.split('?')[0] !== relay.askedRoute) {
+        const now = this.now();
+        Object.assign(relay, { state: 'recorded', attempts: 0, requests: 0, attempt: 0, since: now, nextAt: now });
+        for (const k of ['askedGen', 'askedRoute', 'reason', 'lastError', 'sentAttempt']) delete relay[k];
+        result = { task: id, replaced: false, why: 'the engineer is reachable again; Grove will relay the decision' };
+        wrote = true;
+        return true;
+      }
+      const target = intent ? destination(intent) : t.lastVerifiedPlacement?.repository
+        ? { mode: 'existing-worktree', workspace: t.lastVerifiedPlacement.directory }
+        : destination(t.destination ?? meta.destinations?.[id]);
+      const token = newHandoffToken();
+      meta.handoffs[id] = token;
+      meta.destinations = { ...meta.destinations, [id]: target };
+      this.resetRoute(meta, id);
+      result = { task: id, ...(t.name ? { name: t.name } : {}), replaced: true, handoff: this.handoff(t, token), guidance: this.handoffGuidance(t) };
+      wrote = true;
+      return true;
+    });
+    if (wrote) this.onChange();
+    return result;
   }
 
   // Chief: start tracking a decision until its engineer applies it.
@@ -1209,7 +1318,8 @@ export class GroveProcess {
         try {
           const metadata = typeof d.result?.workingDirectory === 'string' || typeof d.result?.openLink === 'string' ? d.result : JSON.parse(resultText(d.result));
           if (typeof metadata.workingDirectory === 'string') this.metadataDirectory = metadata.workingDirectory;
-          if (typeof metadata.openLink === 'string') this.learnSelfLink(metadata.openLink);
+          // Learned in the background: it re-reads the board to check the hand-off before changing the task.
+          if (typeof metadata.openLink === 'string') this.selfLinkLearned = this.learnSelfLink(metadata.openLink).catch((err) => { this.log(`Grove could not learn this chat's link: ${err.message}`, 'warning'); return false; });
         } catch (err) {
           this.log(`Grove could not read current-session placement metadata: ${err.message}`, 'warning');
         }
@@ -1709,8 +1819,19 @@ export class GroveProcess {
       {
         name: 'grove_handoff',
         description: 'Chief of Staff: get a fresh hand-off for a task whose engineer session never started, stalled or was lost. A new engineer takes the task over and picks it up from the board; the old hand-off stops working.',
-        parameters: { type: 'object', properties: { taskId, destination: destinationSchema }, required: ['taskId'] },
-        handler: guarded(CHIEF, async ({ taskId: id, destination: intent }) => {
+        parameters: { type: 'object', properties: {
+          taskId, destination: destinationSchema,
+          forDecision: { type: 'integer', minimum: 0, description: 'Only when Grove\'s notice gives it: the decision the notice is about.' },
+          forGeneration: { type: 'integer', minimum: 0, description: 'Only when Grove\'s notice gives it: the engineer generation the notice is about.' },
+        }, required: ['taskId'] },
+        handler: guarded(CHIEF, async ({ taskId: id, destination: intent, forDecision, forGeneration }) => {
+          if (forDecision !== undefined || forGeneration !== undefined) {
+            const whole = (n) => Number.isInteger(n) && n >= 0;
+            if (!whole(forDecision) || !whole(forGeneration)) {
+              return { task: id, replaced: false, stale: true, why: 'invalid notice: forDecision and forGeneration must both be whole numbers from Grove\'s notice' };
+            }
+            return this.conditionalHandoff(id, intent, forDecision, forGeneration);
+          }
           await this.engine.refresh();
           const t = this.engine.task(id);
           if (TERMINAL.has(t.stage)) throw new ProcessError('invalid_state', `${id} is ${t.stage}.`);
@@ -2029,7 +2150,7 @@ export class GroveProcess {
     if (!out.duplicate) this.inboxLog.push({ taskId, label: taskLabel(t), title: t.title, action: decision, outcome });
     if (decision === 'cancel') this.attached.delete(taskId);
     this.onChange();
-    return { task: taskId, decision, outcome, ...(out.duplicate ? { duplicate: true } : {}) };
+    return { task: taskId, decision, outcome, applied: (t.decisionsApplied ?? 0) >= out.recorded.seq, ...(out.duplicate ? { duplicate: true } : {}) };
   }
 
   // "Attach to chat" in the Grove inbox: the human's next message in the Chief's chat is about these tasks.
@@ -2169,7 +2290,7 @@ export class GroveProcess {
             : `Tell the human ${id} is ${outcome}`;
     const delivery = relayDelivery('decision', decision);
     const unrouted = !owned && !message && !QUIET_DECISIONS.has(decision) && !route.link
-      ? ` ${id}'s engineer chat isn't confirmed${route.handoffPending ? ' (a new engineer hasn\'t started yet)' : ''}, so there's nothing to send now: its engineer applies it from the board, and Grove asks you for a new engineer if none does.`
+      ? ` ${id}'s engineer chat isn't confirmed (${routeGap(route).text}), so there's nothing to send now: its engineer applies it from the board, and Grove asks you for a new engineer if none does.`
       : '';
     return {
       recorded: { task: id, decision, seq: item.seq },
@@ -2238,6 +2359,17 @@ export class GroveProcess {
     else if (waitingHires.length) guidance = `Hires ${waitingHires.map((k) => k.id).join(', ')} wait until the host's message limit resets (about ${new Date(Math.max(...waitingHires.map((k) => k.retryAt))).toISOString().slice(11, 16)} UTC). End your turn; Grove offers them again then.`;
     else guidance = 'Nothing to do right now.';
     if (question && !guidance.startsWith('The human asked')) guidance += ` The human also asked: "${defang(question.text)}". Answer it with grove_answer once you can.`;
+    // Grove can't reach this chat: no confirmed link (never learned, or an unverifiable one was dropped).
+    // The link is learned from this chat's own get_current_session, and only for its current hand-off.
+    if (this.engine.owns(task) && !TERMINAL.has(task.stage)) {
+      const route = this.leadRoute(task);
+      // Asked once per hand-off: repeating it can't help when the host won't give this chat a link.
+      if (!route.link && !route.handoffPending && this.selfLinkAsked !== task.lead?.token) {
+        this.selfLinkAsked = task.lead?.token;
+        messages.push({ id: `self-link:${task.id}`, tool: 'get_current_session', purpose: 'let Grove learn this chat\'s link, so the human\'s decisions can reach it' });
+        guidance = `Call get_current_session once now (no arguments) so Grove can reach this chat; ${routeGap(route).text}. ${guidance}`;
+      }
+    }
     // The full text of what the human decided and what reviewers said: relays only point here, so nothing
     // depends on a relay arriving whole, in order or at all.
     const live = !TERMINAL.has(task.stage);

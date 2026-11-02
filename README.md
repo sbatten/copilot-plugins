@@ -367,8 +367,24 @@ you ──► Chief of Staff ──► T1 engineer ── plan · execute · ver
   own chat reported or the one `create_session` returned for that hand-off;
   after `grove_handoff` the old chat is never used. Until the engineer applies
   a decision, the Chief relays it again with backoff. If the engineer still
-  can't be reached, the Chief is asked once to start a new one. The inbox
-  shows where each decision has got to.
+  can't be reached, the Chief is asked once to start a new one, with the
+  reason and the `forDecision`/`forGeneration` the notice is about. Passing
+  them makes `grove_handoff` conditional: Grove rechecks fresh state, and a
+  notice made obsolete (a newer engineer or decision, a decision already
+  applied, an engineer reachable again) changes nothing and returns
+  `replaced: false` with why. Plain `grove_handoff` still always replaces.
+  Grove only learns an engineer's link from that engineer's own
+  `get_current_session` while it holds the current hand-off; an engineer
+  with no link is asked to call it once. The inbox shows where each decision
+  has got to (recorded, delivered, delivery failed and why), and says a
+  decision is done only once its engineer has applied it.
+- **Host limits.** A queued send the host rejects with `cannotSteer` is a
+  host result, not a Grove one. An engineer whose chat has gone cold can only
+  be reached again with a host change or a new hand-off. Grove captures the
+  link from any tool result named `get_current_session`. The meta update in
+  `grove_handoff` reloads the board first but is not a cross-process
+  transaction. If the host registers the Grove provider twice, both copies
+  run; Grove does not deduplicate them yet.
 - **Every hand-off is visible.** Each one is a `send_message` from one model
   to another, so it shows up as a turn in that chat in VS Code.
   - **Why not wake sessions directly?** Turns an extension starts itself (the
@@ -717,6 +733,8 @@ node tests/placement.test.mjs                            # routing, Git identity
 node tests/agents.test.mjs                               # plugin manifest, component paths, agent/skill front matter
 node tests/scene.test.mjs                                # team tents: pitch, rest inside, strike
 node tests/report.test.mjs                               # task report, report/evidence/inbox routes
+node tests/relay-outcome.test.mjs                        # host send results: accepted, cannotSteer, redaction
+node tests/decision-text.test.mjs                        # inbox decision lines and toasts
 node skills/grove-sprites/scripts/validate-sprites.mjs   # lint sprites
 node --check extensions/grove-agent-monitor/extension.mjs
 ```
