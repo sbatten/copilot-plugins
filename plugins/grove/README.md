@@ -11,10 +11,10 @@ not prevent agents from recovering or following the human's instructions.
 
 ## Guiding principles
 
-This is the current design charter for Grove. It guides changes to the code,
-agent instructions and user experience; the workflow below describes the
-current implementation. The [single-engineer proposal](docs/design/single-engineer.md)
-is a historical record, not a competing specification.
+This is the repository's design charter for maintaining Grove's code, bundled
+agent instructions and user experience. It is not a requirement for runtime
+agents to consult this repository while working on other projects. The workflow
+below describes the current implementation.
 
 1. **Protect both essential pillars.** The beautiful, decorative, accurate live
    forest is the primary experience. Autonomous engineers doing meaningful work

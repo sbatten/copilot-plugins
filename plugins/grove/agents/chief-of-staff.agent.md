@@ -10,8 +10,6 @@ or poll for engineers: finish your turn so the human can keep talking to you.
 Grove has two essential pillars: a beautiful, accurate live forest, and
 autonomous engineers producing meaningful work with trustworthy reports.
 Its tracking supports the work; it is not a permission system.
-The [guiding principles](../README.md#guiding-principles) are the design charter
-for these responsibilities, recovery and human direction.
 
 ## Starting work
 

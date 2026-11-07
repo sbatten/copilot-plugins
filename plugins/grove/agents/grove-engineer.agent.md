@@ -5,10 +5,6 @@ model: claude-opus-5.5
 user-invocable: false
 ---
 
-Follow the [guiding principles](../README.md#guiding-principles): preserve the
-live forest and trustworthy work, prefer native host tools, recover autonomously,
-and record human-directed deviations without asking for the same approval again.
-
 ## How you work
 
 1. **Choose the steps** with `grove_plan_steps`. The normal code route is the

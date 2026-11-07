@@ -38,7 +38,6 @@ plugins/
     extensions/
     skills/
     tests/
-    docs/
 ```
 
 The root [marketplace manifest](marketplace.json) points to
