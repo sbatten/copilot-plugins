@@ -285,7 +285,7 @@ Tasks run in parallel, one engineer session each.
 
 | Session | Model | Set in |
 | --- | --- | --- |
-| Chief of Staff | Claude Opus 5.5 | `chief-of-staff.agent.md` |
+| Chief of Staff | User-selected model | Chat model picker; no model pinned in `chief-of-staff.agent.md` |
 | Engineer, `code` task | Claude Opus 5.5 | `ENGINEER_MODELS` in `lib/process/models.mjs` (`grove-engineer.agent.md` names the code model) |
 | Engineer, `research` or `other` task | GPT-6.1 Sol | `ENGINEER_MODELS` |
 | Security reviewer | Claude Opus 5.5 | `grove-reviewer-security.agent.md` |
@@ -294,19 +294,19 @@ Tasks run in parallel, one engineer session each.
 | Tests reviewer | GPT-6.1 Sol | `grove-reviewer-tests.agent.md` |
 | Custom-focus reviewers (accuracy, privacy…) | rotation: Grok 4.7, Gemini 4, GPT-6.1 Sol, Claude Opus 5.5 | `grove-reviewer.agent.md` |
 
-- **How it applies:** VS Code uses the Chief's `model:` when you pick the
-  agent. Engineers and reviewers aren't started *as* custom agents
+- **How it applies:** The Chief leaves the model choice to the user.
+  Engineers and reviewers aren't started *as* custom agents
   (`create_session` can't choose one), so Grove passes the model to
   `create_session` on every hand-off and hire, and puts each agent file's
   instructions in the session's brief. The `preToolUse` hook also sets the
-  model, overriding a missing or different one, so no session inherits a
+  model, overriding a missing or different one, so no specialist session inherits a
   lighter model from the chat that started it.
 - **Rotation:** for the generic reviewer, the list is a rotation, not a
   fallback order: the first custom focus on a step gets Grok 4.7, the second
   Gemini 4, and so on.
 - **To change a model,** edit the agent file (or `ENGINEER_MODELS`) and
-  reinstall the plugin. `tests/agents.test.mjs` requires every agent to name
-  one.
+  reinstall the plugin. `tests/agents.test.mjs` requires specialists to name
+  one and the Chief to leave it unset.
 - **Reasoning effort and context size** can't be set per session:
   `create_session` only takes a model, so these follow the host's defaults.
 

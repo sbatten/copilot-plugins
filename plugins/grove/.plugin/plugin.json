@@ -1,6 +1,6 @@
 {
   "name": "grove",
-  "version": "0.25.0",
+  "version": "0.26.0",
   "description": "Chief of Staff orchestration with an independent engineer session per task, phase skills, unanimous reviews, and a live pixel-art forest canvas.",
   "repository": "https://github.com/sbatten/copilot-plugins",
   "agents": "agents/",

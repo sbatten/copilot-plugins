@@ -1,7 +1,7 @@
 // Run: node tests/agents.test.mjs
 // Agent front matter must be valid YAML, or the host silently drops the agent. The usual trap is an
 // unquoted ": " inside a value.
-// Every agent sets its model (see lib/process/models.mjs).
+// Specialists set their models; the Chief uses the user's selected model.
 // Specialists must not declare a `tools:` allowlist: with one, tool search finds deferred tools (browser,
 // screenshots, MCP, skills) but cannot load them, so verification and testing get stuck.
 import assert from 'node:assert/strict';
@@ -55,11 +55,15 @@ for (const f of files) {
     keys.add(key);
     if (!/^['"[]/.test(value)) assert.ok(!/:\s/.test(value) && !/^[&*!|>%@`#]/.test(value), `${f}: quote the "${key}" value; it contains YAML syntax`);
   }
-  for (const k of ['name', 'description', 'model']) assert.ok(keys.has(k), `${f}: missing ${k}`);
-  // Every role names its model; Grove passes it on each hire, so no session falls back to the creator's model.
-  assert.ok(parseModels(text).length, `${f}: model must name at least one model id`);
-  if (f === 'chief-of-staff.agent.md') assert.ok(keys.has('tools'), 'the Chief keeps its coordination-only toolset');
-  else assert.ok(!keys.has('tools'), `${f}: specialists get the full toolset; remove the tools allowlist`);
+  for (const k of ['name', 'description']) assert.ok(keys.has(k), `${f}: missing ${k}`);
+  if (f === 'chief-of-staff.agent.md') {
+    assert.ok(!keys.has('model'), 'the Chief uses the user-selected model instead of pinning one');
+    assert.ok(keys.has('tools'), 'the Chief keeps its coordination-only toolset');
+  } else {
+    assert.ok(keys.has('model'), `${f}: missing model`);
+    assert.ok(parseModels(text).length, `${f}: model must name at least one model id`);
+    assert.ok(!keys.has('tools'), `${f}: specialists get the full toolset; remove the tools allowlist`);
+  }
   assert.ok(path.basename(f).startsWith('grove-') || f === 'chief-of-staff.agent.md', `${f}: unexpected agent file`);
 }
 
