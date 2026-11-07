@@ -467,6 +467,10 @@ you ──► Chief of Staff ──► T1 engineer ── plan · execute · ver
   Recovery/replacement requires the human's explicit request through
   `grove_handoff`. Old conditional recovery notices cannot replace an engineer
   for a decision already applied.
+
+Adopting committed task changes from another session also updates the live canvas.
+New engineers and activity changes reach connected viewers without a follow-up
+Chief turn; unchanged refreshes do not broadcast another state.
   These limits bound Grove's automatic retries, not native tool availability.
   The Chief can inspect, message or recover the team through host tools when asked.
 - **Dismiss everyone in chat** means cancel each active task individually,
@@ -859,6 +863,7 @@ Run these commands from `plugins/grove/`:
 node --test tests/*.test.mjs                             # all process, control, relay, report and scene regressions
 node tests/process.test.mjs                              # process engine, roles, relays (simulated sessions)
 node tests/control.test.mjs                             # durable human decisions, stale writes and notification
+node tests/canvas-refresh.test.mjs                       # external task adoption reaches SSE viewers without chief turns
 node tests/engine.test.mjs                               # engine alone: hold, blockers, questions, shipping, limits
 node tests/placement.test.mjs                            # native routing, truthful activity, non-blocking tracking recovery
 node tests/agents.test.mjs                               # plugin manifest, component paths, agent/skill front matter
