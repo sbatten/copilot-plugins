@@ -1,10 +1,10 @@
 // Shared Grove board. One board has one active Chief of Staff and lives in its original session's data
-// folder (`files/grove/`), next to the verification evidence. Each task's engineer runs in its own session
-// (and so in its own extension process), so every file has exactly one writer:
+// folder (`files/grove/`), next to the verification evidence. Engineers run in separate processes;
+// task snapshots and human decisions share a cross-process per-task lock and revision fence.
 //
 //   board.json            Chief: task numbering, engineer hand-off tokens, notifications already sent.
-//   tasks/<T>.json        The task's owner: the Chief until its engineer claims it, then that engineer.
-//   decisions/<T>.json    Chief: the human's decisions, applied by whoever owns the task.
+//   tasks/<T>.json        Engineer progress and authoritative human transitions.
+//   decisions/<T>.json    Chief: the human's write-ahead decision log.
 //   results/<ticket>.json The reviewer session working that ticket: progress heartbeats and its final review.
 //
 // A registry entry in <copilot-home>/extension-data/grove-agent-monitor/boards/<board-id>.json maps a board
@@ -111,6 +111,7 @@ export class Board {
     this.log = log;
     this.writes = Promise.resolve();
     this.reported = new Set();
+    this.staleTasks = new Set();
   }
 
   get id() {
@@ -200,8 +201,13 @@ export class Board {
     return p;
   }
 
-  flush() {
-    return this.writes;
+  async flush() {
+    await this.writes;
+    if (this.writeError) {
+      const err = this.writeError;
+      this.writeError = null;
+      throw err;
+    }
   }
 
   // The snapshot is taken when the write runs, so a later queued change is never overwritten by an
@@ -298,15 +304,129 @@ export class Board {
     return path.join(this.root, 'decisions', `${id}.json`);
   }
 
-  // Fenced write: refused when the file on disk now belongs to someone other than `expectedOwner`
-  // (another engineer took the task over), so a replaced engineer can never overwrite its successor.
-  saveTask(task, expectedOwner = task.owner) {
-    const snapshot = { format: FORMATS.task, version: VERSION, task: structuredClone(task) };
-    return this.queue(async () => {
+  async taskLock(id, fn) {
+    if (!isTaskId(id)) throw new BoardError('invalid_task', `"${id}" is not a task id.`);
+    const dir = path.join(this.root, 'locks');
+    await fs.mkdir(dir, { recursive: true });
+    const base = path.join(dir, `${id}.lock`);
+    const candidate = `${base}.${process.pid}.${crypto.randomBytes(8).toString('hex')}`;
+    await fs.writeFile(candidate, JSON.stringify({ pid: process.pid }));
+    const deadline = Date.now() + 5000;
+    let held = false;
+    let generation = 0;
+    let file = base;
+    try {
+      while (!held) {
+        try {
+          await fs.access(`${file}.dead`);
+          file = `${base}.${++generation}`;
+          continue;
+        } catch (err) {
+          if (err.code !== 'ENOENT') throw err;
+        }
+        try {
+          await fs.link(candidate, file);
+          held = true;
+        } catch (err) {
+          if (err.code !== 'EEXIST') throw err;
+          try {
+            const owner = JSON.parse(await fs.readFile(file, 'utf8'));
+            if (!Number.isInteger(owner.pid) || owner.pid < 1) throw new BoardError('storage_corrupt', `Invalid lock owner for ${id}.`);
+            try {
+              process.kill(owner.pid, 0);
+            } catch (e) {
+              // Never unlink an abandoned lock: competing recoverers could
+              // otherwise remove a newly acquired lease. Retire this generation
+              // permanently and contend at the next one.
+              if (e.code === 'ESRCH') {
+                try {
+                  await fs.writeFile(`${file}.dead`, '', { flag: 'wx' });
+                } catch (markError) {
+                  if (markError.code !== 'EEXIST') throw markError;
+                }
+                file = `${base}.${++generation}`;
+                continue;
+              }
+              else if (e.code !== 'EPERM') throw e;
+            }
+          } catch (e) {
+            if (e.code !== 'ENOENT') throw e;
+          }
+          if (Date.now() >= deadline) throw new BoardError('storage_busy', `${id} is being updated by another process; retry the action.`);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+      return await fn();
+    } finally {
+      if (held) await fs.unlink(file);
+      await fs.unlink(candidate);
+    }
+  }
+
+  async readTask(id) {
+    const data = await readJson(this.taskFile(id), FORMATS.task);
+    if (!data) return null;
+    if (!validTask(data.task) || data.task.id !== id) throw new BoardError('storage_corrupt', `${id} is malformed; leaving it untouched.`);
+    return data.task;
+  }
+
+  async recoverTask(id) {
+    const task = await this.readTask(id);
+    if (!task || !this.projectDecisions) return task;
+    let items;
+    try {
+      items = await this.readDecisions(id);
+    } catch (err) {
+      if (err instanceof BoardError) throw err;
+      throw new BoardError(err.code ?? 'storage_failed', `Could not recover ${id}: ${err.message}`);
+    }
+    if (!items.some((d) => d.seq > (task.decisionsApplied ?? 0))) return task;
+    const next = this.projectDecisions(task, items);
+    next.revision = (task.revision ?? 0) + 1;
+    next.controlRevision = (task.controlRevision ?? 0) + 1;
+    await writeJson(this.taskFile(id), { format: FORMATS.task, version: VERSION, task: next });
+    return next;
+  }
+
+  // The decision log is the write-ahead record. A reader recovers an interrupted
+  // commit before exposing state; no engineer turn is needed to finish it.
+  decide(id, input, transition) {
+    return this.queue(() => this.taskLock(id, async () => {
       await this.assertChief();
-      const current = await readJson(this.taskFile(task.id), FORMATS.task).catch(() => null);
-      if (current?.task && current.task.owner !== expectedOwner) throw new BoardError('not_owner', `${task.id} is now owned by another session.`);
+      const task = input.action === 'cancel' ? await this.readTask(id) : await this.recoverTask(id);
+      if (!task) throw new BoardError('not_found', `No task "${id}".`);
+      const items = await this.readDecisions(id);
+      const result = transition(task, items, input);
+      if (result.duplicate) return { ...result, task };
+      await writeJson(this.decisionsFile(id), {
+        format: FORMATS.decisions, version: VERSION, task: id, items: [...items, result.item],
+      });
+      const next = result.task;
+      next.revision = (task.revision ?? 0) + 1;
+      next.controlRevision = (task.controlRevision ?? 0) + 1;
+      await writeJson(this.taskFile(id), { format: FORMATS.task, version: VERSION, task: next });
+      return { ...result, task: next };
+    }));
+  }
+
+  // Owner, snapshot revision and human-control revision are checked under the
+  // same lock as publication. Queued stale snapshots cannot regain authority.
+  saveTask(task, expectedOwner = task.owner, expectedRevision = task.revision ?? 0) {
+    const snapshot = { format: FORMATS.task, version: VERSION, task: structuredClone(task) };
+    return this.queue(() => this.taskLock(task.id, async () => {
+      await this.assertChief();
+      if (this.staleTasks.has(task.id)) throw new BoardError('stale_task', `${task.id} needs a reload after a refused write.`);
+      const current = await this.recoverTask(task.id);
+      if (current && current.owner !== expectedOwner) throw new BoardError('not_owner', `${task.id} is now owned by another session.`);
+      if (current && ((current.revision ?? 0) !== expectedRevision
+        || (current.controlRevision ?? 0) !== (snapshot.task.controlRevision ?? 0))) {
+        throw new BoardError('stale_task', `${task.id} changed on the board; reload before continuing.`);
+      }
       await writeJson(this.taskFile(task.id), snapshot);
+    })).catch((err) => {
+      this.staleTasks.add(task.id);
+      this.writeError ??= err;
+      throw err;
     });
   }
 
@@ -323,11 +443,11 @@ export class Board {
       const m = /^(T\d{1,6})\.json$/.exec(name);
       if (!m) continue;
       try {
-        const data = await readJson(this.taskFile(m[1]), FORMATS.task);
-        if (data && validTask(data.task) && data.task.id === m[1]) out.push(data.task);
-        else if (data) this.warnOnce(name, `Grove task file ${name} is malformed; skipping it.`);
+        const task = await this.taskLock(m[1], () => this.recoverTask(m[1]));
+        if (task) out.push(task);
       } catch (err) {
         this.warnOnce(name, err.message);
+        throw err;
       }
     }
     return out.sort((a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1)));
@@ -340,14 +460,14 @@ export class Board {
     return data.items.filter((d) => Number.isInteger(d?.seq) && typeof d.action === 'string');
   }
 
-  // Chief only: append the human's decision for the task's owner to apply.
+  // Append-only write-ahead support, also used to recover legacy pending logs.
   // `via` is 'grove' when the human decided in the canvas inbox rather than in the Chief's chat.
   // Read, dedupe and write run as one queued job, so two clicks can't both read the same last seq. An inbox
   // click identical to one still waiting to be applied (seq > appliedThrough) isn't appended twice. Chat
   // decisions and workspace-repair grants are deliberate and always appended: the caller's appliedThrough can
   // lag the owner's save, so deduping them could silently drop a repeated, already-applied decision.
   appendDecision(taskId, { action, note, via = 'chat', ship, workspaceRepair }, { appliedThrough = 0 } = {}) {
-    return this.queue(async () => {
+    return this.queue(() => this.taskLock(taskId, async () => {
       await this.assertChief();
       const items = await this.readDecisions(taskId);
       const same = via === 'grove' && !workspaceRepair && items.find((d) => d.seq > appliedThrough
@@ -359,7 +479,7 @@ export class Board {
       items.push(item);
       await writeJson(this.decisionsFile(taskId), { format: FORMATS.decisions, version: VERSION, task: taskId, items });
       return { item, duplicate: false };
-    });
+    }));
   }
 
   // Cheap change detector: names + mtimes of every board file.

@@ -320,7 +320,7 @@ const DECISION_WORDS = {
 // Chief → engineer: the human decided.
 export function decisionMessage(boardId, task, item) {
   const words = DECISION_WORDS[item.action] ?? item.action;
-  return `[grove-decision:${boardId}/${task.id}:${item.seq}] The human ${words} for ${taskLabel(task)}.${item.note ? ` They said: "${notePreview(item.note)}"` : ''} ${GO_NEXT}: its "decisions" field has the full decision.`;
+  return `[grove-decision:${boardId}/${task.id}:${item.seq}] The human ${words} for ${taskLabel(task)}. Grove has already applied the decision to the board.${item.note ? ` They said: "${notePreview(item.note)}"` : ''} ${GO_NEXT}: its "decisions" field has the full decision.`;
 }
 
 export const MEMBER_MARKER = /\[grove-hire:([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/(T\d{1,6}-[a-z0-9-]{1,40})\/([a-f0-9]{8,64})\]/;

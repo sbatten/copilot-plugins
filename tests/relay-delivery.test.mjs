@@ -292,16 +292,15 @@ for (const k of ['hire', 'notice', 'resend']) assert.equal(relayDelivery(k), 'qu
   await chief.call('grove_record_decision', { taskId: 'T1', decision: 'note', note: 'first' });
   await chief.call('grove_record_decision', { taskId: 'T1', decision: 'note', note: 'second' });
   await sync(eng);
-  // The board can't be read for a moment: grove_next says so (it doesn't fail), and the cursor doesn't move.
+  // An unreadable control log fails closed before work is exposed; the cursor doesn't move.
+  await settle(eng);
   const read = eng.proc.board.readDecisions.bind(eng.proc.board);
   eng.proc.board.readDecisions = async () => { throw new Error('EIO'); };
   let next = await eng.call('grove_next');
-  assert.equal(next.ok, true, next.data);
-  assert.equal(next.data.decisionsUnavailable, 'storage_failed');
-  assert.deepEqual(next.data.decisions, []);
-  assert.match(next.data.guidance, /^Grove couldn't read the human's decisions in full from the board just now.*call grove_next again.*grove_blocked/);
+  assert.equal(next.ok, false);
+  assert.match(next.data, /Could not recover T1: EIO/);
   eng.proc.board.readDecisions = async () => { throw Object.assign(new Error('bad json'), { code: 'storage_corrupt' }); };
-  assert.equal((await eng.call('grove_next')).data.decisionsUnavailable, 'storage_corrupt', 'the board\'s code is passed on');
+  assert.match((await eng.call('grove_next')).data, /bad json/);
   assert.equal(await eng.proc.hasUnreadDecisions(task()), true, 'an unreadable board counts as unread decisions');
   eng.proc.board.readDecisions = read;
   assert.equal(task().consumedDecisionSeq, 0, 'a degraded grove_next leaves the cursor');
@@ -550,10 +549,11 @@ for (const kind of ['report', 'decision']) {
   eng.proc.unseenReports.add('T1-plan-code-1');
   assert.match(await eng.proc.onRelay('report', 'T1-plan-tests-99'), /no reviewer report T1-plan-tests-99 for T1, but other news is waiting/);
   eng.proc.unseenReports.clear();
-  // And an unreadable board is treated as unread.
+  // An unreadable control log fails closed, rather than inviting continued work.
+  await settle(eng);
   const read = eng.proc.board.readDecisions.bind(eng.proc.board);
   eng.proc.board.readDecisions = async () => { throw new Error('EIO'); };
-  assert.match(await eng.proc.onRelay('report', 'T1-plan-tests-99'), /other news is waiting/);
+  await assert.rejects(eng.proc.onRelay('report', 'T1-plan-tests-99'), /Could not recover T1: EIO/);
   eng.proc.board.readDecisions = read;
 }
 

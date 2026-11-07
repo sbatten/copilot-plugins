@@ -319,10 +319,10 @@ you ──► Chief of Staff ──► T1 engineer ── plan · execute · ver
             │   │               ├──► T1 · Security / Tests / Code / Architecture      (execute; same chats)
             │   │               └──► T1 · Tests reviewer                               (verify; same chat)
             │   │                         └─ each reviews, then reports back to the engineer's chat
-            │   └─ grove_record_decision ─► board ──► engineer wakes up and continues
+            │   └─ grove_record_decision ─► board applies it ──► optional engineer notification
             ├──── "[Grove → Chief of Staff] T1 is ready" + report ◄── board ◄── submissions and reviews
             │
-   grove inbox (Complete / Dismiss) ─► board ──► engineer applies it (and wakes if work continues)
+   grove inbox (Complete / Dismiss) ─► board applies it ──► optional engineer notification
 ```
 
 - **Down:** `grove_create_task` names the task and returns a hand-off (title, a short prompt with
@@ -344,40 +344,42 @@ you ──► Chief of Staff ──► T1 engineer ── plan · execute · ver
   engineer's active turn (`delivery: "steer"`), or, if the engineer is idle
   (the host answers with action `rejected` and reason `cannotSteer`), is
   resent queued and starts its next turn; any other result is not resent.
-  The engineer's Grove applies it (the engineer's session is the only writer
-  of task state).
+  The engineer's Grove applies reviewer results through revision-fenced task writes.
 - **Up:** when a task needs you (a delivered result, an escalation, a
   blocker), the engineer **messages the Chief** (`grove_next` lists the
   message). Grove attaches the full details to that turn, and the Chief relays
   them to you.
-- **Back down:** your answer goes to the Chief, which records it with
-  `grove_record_decision` and **messages the engineer** with the result.
+- **Back down:** your answer goes to the Chief, which applies it with
+  `grove_record_decision` before returning success. It can notify the engineer.
   Decisions that change the engineer's work (changes, note, question, hold,
-  cancel) steer its active turn; the rest queue. The engineer's turn applies
-  it and carries on.
+  cancel) steer its active turn; the rest queue. The engineer reads the already
+  applied decision and continues only if the resulting state permits work.
 - **Relays are pointers.** Host messages can be clipped or arrive out of
   order, so a relay only carries its marker and tells the engineer to call
   `grove_next`, whose `decisions` and `reviews` fields hold the full text.
   Stale, replayed or forged markers are ignored.
-- **Decisions converge.** A decision is recorded once: a second click, or
-  the same answer again before the engineer has applied the first, is a
-  duplicate. A cancel overtakes the decisions queued before it, so a
-  queued Complete never ships a task you since dismissed. Grove only
-  messages the engineer that holds the current hand-off, at the link its
-  own chat reported or the one `create_session` returned for that hand-off;
-  after `grove_handoff` the old chat is never used. Until the engineer applies
-  a decision, the Chief relays it again with backoff. If the engineer still
-  can't be reached, the Chief is asked once to start a new one, with the
-  reason and the `forDecision`/`forGeneration` the notice is about. Passing
-  them makes `grove_handoff` conditional: Grove rechecks fresh state, and a
-  notice made obsolete (a newer engineer or decision, a decision already
-  applied, an engineer reachable again) changes nothing and returns
-  `replaced: false` with why. Plain `grove_handoff` still always replaces.
-  Grove only learns an engineer's link from that engineer's own
-  `get_current_session` while it holds the current hand-off; an engineer
-  with no link is asked to call it once. The inbox shows where each decision
-  has got to (recorded, delivered, delivery failed and why), and says a
-  decision is done only once its engineer has applied it.
+- **Human control is authoritative.** Both chat and inbox actions apply
+  durably without an engineer session. Duplicate UI actions and repeated
+  cancellation are safe. Per-task filesystem locking and revision checks stop
+  stale saves, claims and callbacks from overwriting human state. Interrupted
+  commits replay the durable decision log on the next board read.
+- **Notification is separate.** Only verified current-engineer links are used.
+  Delivery has a persisted limit of three attempts per decision/generation,
+  including the one permitted steer-to-queue fallback. Unknown chat ownership
+  stops retries immediately. Application remains successful even if notification
+  is unavailable; execution (answering, publishing, merging) is separately pending.
+  Grove does not automatically replace an engineer for failed notification.
+  Recovery/replacement requires the human's explicit request through
+  `grove_handoff`. Old conditional recovery notices cannot replace an engineer
+  for a decision already applied.
+- **Dismiss everyone in chat** means cancel each active task individually,
+  equivalent to using each engineer's existing Dismiss action. No bulk-dismiss
+  UI is added. The Chief remains, and reports/history are preserved. Scene-only
+  `clearAgents` cannot dismiss task teams.
+- **Concurrency rollout:** all Grove processes sharing a board must reload the
+  updated plugin before relying on revision fencing. Older running code does
+  not honor the new lock/revision contract. A tool already in flight cannot be
+  undone; cancellation prevents further work at the next tool boundary.
 - **Host limits.** A queued send the host rejects with `cannotSteer` is a
   host result, not a Grove one. An engineer whose chat has gone cold can only
   be reached again with a host change or a new hand-off. Grove captures the
@@ -688,7 +690,7 @@ skills/grove-sprites/
 | `grove_create_task` | Chief | Open a task `{ title, goal, kind, destination, criteria? }`. Pass the exact returned handoff to `create_session`; workspace/worktree are omitted for scratch. |
 | `grove_handoff` | Chief | Get a fresh hand-off for a task whose engineer never started, stalled or was lost. The new engineer picks the task up from the board. |
 | `grove_resume` | Fresh Chief | Resume an existing board with the human's permission; keep its tasks and engineers and route notices to this chat. |
-| `grove_record_decision` | Chief | Record what the human decided, asked or said: `approve` (`ship: false` to skip the PR), `changes`, `note`, `question`, `hold`, `resume`, `retry`, `merge` or `cancel`, with their words as `note`. Grove checks it applies to the task's stage. It returns the message to send the engineer. |
+| `grove_record_decision` | Chief | Apply a human decision durably: `approve` (`ship: false` to skip the PR), `changes`, `note`, `question`, `hold`, `resume`, `retry`, `merge`, `shelve`, `unshelve` or `cancel`. Returns resulting state and an optional notification. No engineer acknowledgement is required. |
 | `grove_cancel_task` | Chief | Cancel a task. |
 | `grove_status` | anyone | Show each task's stage, kind, engineer and reviewers (with chat links), steps and their review votes, recent history, and what's waiting on the human. |
 | `grove_plan_steps` | engineer | Choose or change the route: `{ template?, steps?: [{ kind, title?, brief?, reviewers? }], replace?, redoFrom?, note? }`. Returns what to do next, like `grove_next`. |
@@ -713,11 +715,11 @@ These are mostly used for manual scenes and demos. Process agents appear automat
 | `getState` | Return agents, the council, the theme, station visibility and the viewer count. |
 | `hireAgent` | Hire an agent: `{ id, role, name?, palette?, activity?, task? }`. It walks in from the road. |
 | `updateAgent` | Change an agent: `{ id, activity?, task?, error?, name?, role?, palette? }`. On an activity change, the agent walks to that station. |
-| `dismissAgent` | Dismiss an agent: `{ id }`. It walks out of the grove. |
+| `dismissAgent` | Dismiss a manually hired scene agent: `{ id }`. Cancel a task to dismiss its engineer/team. |
 | `convene` | Gather agents at the council ring: `{ topic, members[] }`. |
 | `resolveCouncil` | End the council: `{ decision?, next? }`. The decision is announced, and members return to their prior activities (or `next`). |
 | `configureScene` | Change the scene: `{ theme?: night\|dusk\|dawn, stations?: { <station>: boolean } }`. |
-| `clearAgents` | Dismiss everyone. |
+| `clearAgents` | Clear manual scene agents and their council only; does not cancel tasks. |
 | `summonDemo` | Hire a demo party: `{ cycle?: boolean }`. By default the party keeps moving. |
 | `setView` | Switch views: `{ view: "scene" \| "gallery" }`. |
 | `snapshot` | Return a PNG of the visible canvas so an agent can see it: `{ scale?: 1–4 }`. |

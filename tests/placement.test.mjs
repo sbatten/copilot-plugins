@@ -218,6 +218,7 @@ try {
   eng.s.workingDirectory = checkout;
   await eng.hooks.onUserPromptSubmitted({ prompt: 'Host completed attachment', workingDirectory: checkout });
   assert.equal(await eng.call('bash'), undefined);
+  t = eng.p.leadTask();
   assert.equal(t.placement.status, 'verified');
   const unchanged = await fs.readFile(eng.p.board.taskFile(t.id), 'utf8');
   await eng.call('view');

@@ -40,7 +40,7 @@ assert.equal(decisionLine({ ...engineLost, state: 'superseded' }, cancelled), 'N
 assert.equal(toastText('complete', live, { applied: true, outcome: 'done' }), 'Quill completed: signed off.');
 assert.equal(toastText('complete', live, { applied: true, outcome: 'shipping' }), 'Quill approved: the team opens a pull request next.');
 assert.equal(toastText('complete', live, { applied: true, outcome: 'back to work' }), 'Quill: step accepted; the team carries on.');
-assert.equal(toastText('merge', live, { applied: true }), 'Quill: the team is merging the pull request.');
+assert.equal(toastText('merge', live, { applied: true }), 'Quill: merge authorized; execution pending.');
 assert.equal(toastText('dismiss', live, { applied: true }), 'Quill dismissed: the task is cancelled.');
 for (const [kind, what] of [['complete', 'Your sign-off'], ['merge', 'Your merge request'], ['dismiss', 'Your dismissal']]) {
   for (const out of [{ applied: false, outcome: 'done' }, {}, undefined, { duplicate: true }]) {
