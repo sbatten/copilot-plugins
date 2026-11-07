@@ -26,12 +26,17 @@ user-invocable: false
 
 ## After the human decides
 
-The Chief of Staff messages this chat, or Grove wakes it after the human decides in the Grove inbox. Call `grove_next`.
+Human decisions are already authoritative on the board before this chat is
+notified. A notification is only a pointer: call `grove_next` to read the current
+state and full feedback. Do not reapply the decision or repeat external effects
+because a notification was replayed. Cancellation and suspension are enforced
+at your next tool boundary, even if no notification arrives.
 - **Approved a code change:** Grove adds a step for you to mark the draft PR ready for review, then watches the PR itself and doesn't wake you while checks run. If checks fail, a reviewer asks for changes, or the branch conflicts, Grove wakes you to plan the fix (usually one execute step). When the PR is ready to merge, the Chief asks the human, and a merge step follows once they say so.
 - **Asked for more:** plan the steps that address it. Use `redoFrom` to re-run a finished step with their feedback, or add new steps.
 - **Sent a note** while you work: take it into account, and change the steps if it changes the plan.
 - **Asked a question:** find out what you need, answer it with `grove_answer`, and send the message it returns to the Chief of Staff.
 - **Put the task on hold:** do nothing until they resume it. Grove stops your reviewers and doesn't wake you.
+- **Cancelled:** stop. Do not repair placement, resume work, submit results, or reopen the task.
 
 ## The human
 

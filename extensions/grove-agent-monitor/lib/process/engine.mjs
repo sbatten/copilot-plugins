@@ -307,6 +307,18 @@ export class ProcessEngine {
     this.state = { tasks: [], updatedAt: now() };
     this.byToolCall = new Map();
     this.claimingFrom = new Map();
+    this.board.projectDecisions = (task, items) => this.projectDecisions(task, items);
+  }
+
+  projectDecisions(task, items) {
+    const staged = structuredClone(task);
+    normalizeTask(staged, this.board.id);
+    const engine = new ProcessEngine({
+      board: { root: this.root, saveTask: async () => {} }, selfId: staged.owner,
+    });
+    engine.state.tasks = [staged];
+    engine.applyDecisions(staged, items);
+    return staged;
   }
 
   owns(task) {
@@ -326,9 +338,15 @@ export class ProcessEngine {
     this.state.updatedAt = now();
   }
 
-  // Re-read tasks owned by other sessions. Tasks this session owns stay authoritative in memory unless
-  // another session has taken them over. Returns { changed, lost } task ids.
+  // Human decisions may update even an owned task. Flush local writes and adopt
+  // newer persisted revisions before continuing. Returns { changed, lost } ids.
   async refresh() {
+    try {
+      await this.board.flush();
+    } catch (err) {
+      if (!['stale_task', 'not_owner'].includes(err.code)) throw err;
+      this.log(`Grove reloading after refusing a stale write: ${err.message}`, 'warning');
+    }
     const fresh = await this.board.readTasks();
     const changed = [];
     const lost = [];
@@ -338,14 +356,16 @@ export class ProcessEngine {
       normalizeTask(f, this.board.id);
       const local = byId.get(f.id);
       if (local && this.owns(local)) {
-        if (f.owner === this.selfId) {
+        if (!this.board.staleTasks?.has(f.id) && f.owner === this.selfId && (f.revision ?? 0) === (local.revision ?? 0)
+          && (f.controlRevision ?? 0) === (local.controlRevision ?? 0)) {
           next.push(local);
           continue;
         }
-        lost.push(f.id);
+        if (f.owner !== this.selfId) lost.push(f.id);
       }
-      if (!local || local.updatedAt !== f.updatedAt || local.owner !== f.owner) changed.push(f.id);
+      if (!local || local.updatedAt !== f.updatedAt || local.owner !== f.owner || local.revision !== f.revision) changed.push(f.id);
       next.push(f);
+      this.board.staleTasks?.delete(f.id);
     }
     // Keep owned tasks whose file has not been written yet.
     for (const t of this.state.tasks) if (this.owns(t) && !fresh.some((f) => f.id === t.id)) next.push(t);
@@ -366,7 +386,9 @@ export class ProcessEngine {
       if (this.holding?.has(task.id)) {}
       else if (this.owns(task)) {
         const from = this.claimingFrom.get(task.id);
-        this.board.saveTask(task, from ?? this.selfId).then(() => {
+        const revision = task.revision ?? 0;
+        task.revision = revision + 1;
+        this.board.saveTask(task, from ?? this.selfId, revision).then(() => {
           if (from !== undefined && this.claimingFrom.get(task.id) === from) this.claimingFrom.delete(task.id);
         }).catch((err) => this.log(`Grove could not save ${task.id}: ${err.message}`, 'error'));
       }
@@ -599,7 +621,7 @@ export class ProcessEngine {
       try {
         this.humanDecision({ taskId: task.id, action: d.action, note: d.note ?? '', ship: typeof d.ship === 'boolean' ? d.ship : undefined });
         if (d.workspaceRepair && d.seq > (task.repairInvalidatedThrough ?? 0)
-          && d.workspaceRepair.sessionId === this.selfId && ['retry', 'note'].includes(d.action)) {
+          && d.workspaceRepair.sessionId === task.owner && ['retry', 'note'].includes(d.action)) {
           task.workspaceRepair = { ...d.workspaceRepair, seq: d.seq };
           this.changed(task, 'The human authorized workspace repair; immediate host confirmation is still required.');
         }
@@ -943,7 +965,7 @@ export class ProcessEngine {
     const { task, ticket } = found;
     if (result.token !== ticket.token) return false;
     if (ticket.status === 'done' || ticket.status === 'failed' || ticket.status === 'cancelled') return false;
-    if (TERMINAL.has(task.stage) || task.stage === 'escalated' || task.stage === 'awaiting-approval' || PAUSED_STAGES.has(task.stage)) return false;
+    if (TERMINAL.has(task.stage) || task.stage === 'shelved' || task.stage === 'escalated' || task.stage === 'awaiting-approval' || PAUSED_STAGES.has(task.stage)) return false;
     const m = task.members[ticket.member];
     if (m && result.sessionId) m.sessionId = result.sessionId;
     if (m) { m.status = 'alive'; m.seenAt = now(); }

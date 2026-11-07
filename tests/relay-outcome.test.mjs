@@ -24,6 +24,7 @@ const cases = [
   ['completed', ok({ status: 'completed' }), { kind: 'accepted', reason: null }],
   ['malformed JSON', ok({ content: '{"action":' }), { kind: 'accepted', reason: null }],
   ['plain text', ok({ content: 'Message sent.' }), { kind: 'accepted', reason: null }],
+  ['textual missing owner', ok({ content: 'Unknown chat owner: ahp-chat:/missing' }), { kind: 'failed', reason: 'Unknown chat owner: ahp-chat:/missing' }],
   ['array result', ok([{ action: 'rejected' }]), { kind: 'accepted', reason: null }],
 ];
 for (const [name, input, want] of cases) {

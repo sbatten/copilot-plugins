@@ -12,6 +12,12 @@ function lostCancelRace(d, task) {
 export function decisionLine(d, task) {
   if (!d) return null;
   if (lostCancelRace(d, task)) return null;
+  if (d.state === 'applied') {
+    if (['unavailable', 'exhausted', 'delivery-failed'].includes(d.notification)) {
+      return `Applied · engineer notification ${d.notification === 'delivery-failed' ? 'failed' : d.notification}${d.reason ? `: ${d.reason}` : ''}`;
+    }
+    return null;
+  }
   switch (d.state) {
     case 'recorded': return 'Recorded · waiting for engineer';
     case 'relay-requested': return 'Recorded · Chief relaying to engineer';
@@ -25,15 +31,14 @@ export function decisionLine(d, task) {
   }
 }
 
-// The status line after an inbox action. Only a decision Grove has already applied is described as done;
-// otherwise it's recorded and its engineer applies it next.
+// Application is not completion of an authorized external action such as merge.
 export function toastText(kind, task, out = {}) {
   const name = task?.name ?? task?.id;
   if (out?.applied === true) {
     if (kind === 'complete') {
       return { done: `${name} completed: signed off.`, shipping: `${name} approved: the team opens a pull request next.` }[out.outcome] ?? `${name}: step accepted; the team carries on.`;
     }
-    if (kind === 'merge') return `${name}: the team is merging the pull request.`;
+    if (kind === 'merge') return `${name}: merge authorized; execution pending.`;
     if (kind === 'dismiss') return `${name} dismissed: the task is cancelled.`;
   }
   const what = { complete: 'Your sign-off', merge: 'Your merge request', dismiss: 'Your dismissal' }[kind] ?? 'Your decision';
