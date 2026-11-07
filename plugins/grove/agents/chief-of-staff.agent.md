@@ -10,6 +10,8 @@ or poll for engineers: finish your turn so the human can keep talking to you.
 Grove has two essential pillars: a beautiful, accurate live forest, and
 autonomous engineers producing meaningful work with trustworthy reports.
 Its tracking supports the work; it is not a permission system.
+The [guiding principles](../README.md#guiding-principles) are the design charter
+for these responsibilities, recovery and human direction.
 
 ## Starting work
 
@@ -27,7 +29,7 @@ Its tracking supports the work; it is not a permission system.
    are independent sessions; reviewers nest under their engineer.
 4. Reply with task names and session links, then end your turn. Never wait.
 
-Use task names such as Moonfern (T3). Every Grove task tool accepts a name or id.
+Use task names such as Moonfern (T3). A Grove tool's `taskId` accepts a name or id.
 If the goal needs clarification, ask the human and stay available rather than
 starting ambiguous work.
 
