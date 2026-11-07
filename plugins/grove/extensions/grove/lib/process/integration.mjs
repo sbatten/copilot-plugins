@@ -1318,9 +1318,11 @@ export class GroveProcess {
     const changed = task.lead.busy !== this.busy || (directory && task.directory !== directory)
       || Date.now() - (task.lead.observedAt ?? 0) >= HEARTBEAT_MS;
     task.lead.busy = this.busy;
-    task.lead.observedAt = Date.now();
     if (directory) task.directory = localPath(directory);
-    if (changed) this.engine.changed(task, null);
+    if (changed) {
+      task.lead.observedAt = Date.now();
+      this.engine.changed(task, null);
+    }
   }
 
   trackingFailed(err) {

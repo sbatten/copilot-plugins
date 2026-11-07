@@ -61,6 +61,25 @@ try {
   await chief.proc.poll();
   assert.ok(chief.changes > before, 'stale activity triggers a canvas update even with no new board writes');
   await engineer.hooks.onPreToolUse({ toolName: 'bash', toolArgs: {} });
+  {
+    const task = engineer.proc.leadTask();
+    await engineer.proc.board.flush();
+    const observedAt = task.lead.observedAt;
+    const revision = task.revision;
+    const realNow = Date.now;
+    try {
+      for (let second = 1; second <= 30; second++) {
+        Date.now = () => observedAt + second * 1000;
+        engineer.proc.observeSession();
+      }
+      await engineer.proc.board.flush();
+      const persisted = await engineer.proc.board.readTask(task.id);
+      assert.ok(persisted.revision > revision, 'frequent observations must not postpone the published heartbeat');
+      assert.equal(persisted.lead.observedAt, observedAt + 30000, 'another canvas sees a fresh heartbeat during a long-running turn');
+    } finally {
+      Date.now = realNow;
+    }
+  }
   assert.equal(engineer.proc.leadTask().directory, checkout, 'record host attachment without probing Git or gating work');
   for (const tool of ['bash', 'set_workspace', 'ask_user', 'isolate_session', 'move_session', 'create_session']) {
     assert.equal(await engineer.hooks.onPreToolUse({ toolName: tool, toolArgs: {} }), undefined, `${tool} uses host permissions`);
