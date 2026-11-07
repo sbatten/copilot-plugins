@@ -1,12 +1,12 @@
 {
-  "name": "grove",
+  "name": "sbatten",
   "owner": {
     "name": "sbatten"
   },
   "plugins": [
     {
-      "name": "grove-agent-monitor",
-      "source": "./",
+      "name": "grove",
+      "source": "./plugins/grove/",
       "description": "Chief of Staff orchestration with an independent engineer session per task, phase skills, unanimous reviews, and a live pixel-art forest canvas.",
       "version": "0.23.0"
     }
