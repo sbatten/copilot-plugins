@@ -144,6 +144,7 @@ for (const k of ['hire', 'notice', 'resend']) assert.equal(relayDelivery(k), 'qu
   const res = await chief.call('grove_record_decision', { taskId: 'T1', decision: 'note', note: NOTE });
   assert.equal(res.ok, true, res.data);
   assert.equal(res.data.delivery, 'steer', 'a note steers');
+  assert.equal(res.data.message.delivery, 'steer', 'the native send arguments include steering');
   assert.equal(res.data.fallback, DELIVERY_FALLBACK);
   assert.match(res.data.guidance, /delivery "steer"/);
   const msg = res.data.message.message;
@@ -154,7 +155,7 @@ for (const k of ['hire', 'notice', 'resend']) assert.equal(relayDelivery(k), 'qu
   // The engineer is busy; the steer lands at its next tool boundary.
   const host = new RelayHost();
   host.add(eng.link, async (m) => (await eng.hooks.onUserPromptSubmitted({ prompt: m, sessionId: eng.id }))?.additionalContext, { active: true });
-  assert.deepEqual((await host.relay({ session: res.data.message.session, message: msg, delivery: res.data.delivery })).map((r) => r.action), ['steered']);
+  assert.deepEqual((await host.relay(res.data.message)).map((r) => r.action), ['steered']);
   const ctx = await host.boundary(eng.link, 'edit');
   assert.match(ctx, /Call grove_next now: its "decisions" field has the full decision/);
   const next = await eng.call('grove_next');
@@ -168,6 +169,27 @@ for (const k of ['hire', 'notice', 'resend']) assert.equal(relayDelivery(k), 'qu
   // Replaying the consumed relay doesn't act again, and still points at grove_next.
   assert.match(await eng.proc.onRelay('decision', /\/(T1:\d+)\]/.exec(msg)[1]), /already applied .*call grove_next if you haven't since/);
   assert.deepEqual((await eng.call('grove_next')).data.decisions, []);
+}
+
+// Automatic decision notifications use the same delivery policy as the immediate tool response.
+for (const action of ['note', 'resume']) {
+  const { chief, eng } = await setup();
+  if (action === 'resume') await chief.call('grove_record_decision', { taskId: 'T1', decision: 'hold' });
+  const res = await chief.call('grove_record_decision', { taskId: 'T1', decision: action, note: 'Follow the human\'s direction.' });
+  assert.equal(res.ok, true, res.data);
+  await chief.proc.board.updateMeta((meta) => { meta.decisionRelays.T1.nextAt = 0; });
+  const sends = [];
+  await chief.proc.advanceRelays(sends);
+  assert.equal(sends.length, 1);
+  const [, delivery, message] = /delivery: (steer|queue), message: ([^\n]+)/.exec(sends[0].text);
+  assert.equal(delivery, res.data.delivery);
+  assert.equal(sends[0].text.includes(DELIVERY_FALLBACK), action === 'note');
+  const host = new RelayHost();
+  host.add(eng.link, async (m) => (await eng.hooks.onUserPromptSubmitted({ prompt: m }))?.additionalContext, { active: true });
+  await host.relay({ session: res.data.message.session, message, delivery });
+  const ctx = await host.boundary(eng.link, 'engineer-next-action');
+  if (action === 'note') assert.match(ctx, /Call grove_next now/);
+  else assert.equal(ctx, null, 'resume waits for a new turn');
 }
 
 // 3. A 13k review reaches the engineer whole through grove_next: (a) while another reviewer is still working,

@@ -922,7 +922,8 @@ export class GroveProcess {
       relay.requests = (relay.requests ?? 0) + 1;
       set(relay, 'relay-requested', { nextAt: now + this.relayDelay(relay.requests) });
       const words = INBOX_WORDS[relay.action] ? `${INBOX_WORDS[relay.action]}` : `decided "${relay.action}" for`;
-      sends.push({ id: null, relay: taskId, text: `[Grove] The human ${words} ${taskLabel(t)} "${t.title}". The decision is already applied. Optional notification (${relay.requests}/${RELAY_MIN_ATTEMPTS}): send_message with session: ${route.link}, delivery: queue, message: ${decisionMessage(this.board.id, t, item)}\nDo not recover or replace an engineer for notification failure. End your turn.` });
+      const delivery = relayDelivery('decision', item.action);
+      sends.push({ id: null, relay: taskId, text: `[Grove] The human ${words} ${taskLabel(t)} "${t.title}". The decision is already applied. Optional notification (${relay.requests}/${RELAY_MIN_ATTEMPTS}): send_message with session: ${route.link}, delivery: ${delivery}, message: ${decisionMessage(this.board.id, t, item)}\n${delivery === 'steer' ? `${DELIVERY_FALLBACK} ` : ''}Do not recover or replace an engineer for notification failure. End your turn.` });
     }
     return changed;
   }
@@ -2174,8 +2175,9 @@ export class GroveProcess {
     const outcome = decisionOutcome(t, before, decision, ship);
     const route = this.leadRoute(t);
     const owned = this.engine.owns(t);
+    const delivery = relayDelivery('decision', decision);
     const message = !duplicate && t.lead && !owned && route.link && !QUIET_DECISIONS.has(decision)
-      ? { tool: 'send_message', session: route.link, message: decisionMessage(this.board.id, t, item) }
+      ? { tool: 'send_message', session: route.link, message: decisionMessage(this.board.id, t, item), delivery }
       : null;
     if (!duplicate) {
       await this.board.updateMeta((meta) => {
@@ -2192,7 +2194,6 @@ export class GroveProcess {
           : outcome === 'shipping' ? `Tell the human ${id}'s engineer will publish the pull request, and Grove will watch it through checks and review and come back when it's ready to merge or needs them`
             : outcome === 'on the shelf' ? `Tell the human ${id} is on the shelf: it's out of their inbox, its engineer is resting with everything intact, and they can bring it back from the shelf in the Grove (or by asking you) whenever they're ready${t.ship?.pr ? '; Grove keeps watching its PR and brings it back if the PR needs work' : ''}`
             : `Tell the human ${id} is ${outcome}`;
-    const delivery = relayDelivery('decision', decision);
     const unrouted = !owned && !message && !QUIET_DECISIONS.has(decision) && !route.link
       ? ` Notification is unavailable (${routeGap(route).text}). The decision is already applied; recovery is optional and requires the human's request.`
       : '';

@@ -25,6 +25,9 @@ Its tracking supports the work; it is not a permission system.
    Pass your `chiefSession` from `get_current_session.openLink` on the first task.
 3. Call native `create_session` with each returned handoff's fields. Engineers
    are independent sessions; reviewers nest under their engineer.
+   The initial brief must contain all startup instructions in the task's goal
+   and criteria. Do not send a separate decision to kick off or authorize work:
+   creating the engineer starts it immediately.
 4. Reply with task names and session links, then end your turn. Never wait.
 
 Use task names such as Moonfern (T3). A Grove tool's `taskId` accepts a name or id.
@@ -40,7 +43,8 @@ starting ambiguous work.
   work; `question` asks the engineer for an answer. `approve`, `merge`,
   `hold`, `resume`, `retry`, `cancel`, `shelve` and `unshelve` cover the common
   actions. These are conveniences, not a vocabulary the human must learn.
-- Send the returned message using native `send_message` and its `delivery`.
+- Send the returned message using native `send_message`, including the
+  `delivery` field in the returned message.
   Only a `cannotSteer` result calls for one queued fallback.
 - Explicit human direction overrides the normal process. If they say to skip
   reviews, leave work locally, publish immediately, or merge, pass that on.

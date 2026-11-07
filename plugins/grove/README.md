@@ -419,6 +419,8 @@ you ──► Chief of Staff ──► T1 engineer ── plan · execute · ver
   engineer with it. In the new session Grove turns the marker into the
   engineer's full brief: its standing instructions (`grove-engineer.agent.md`),
   the goal, the criteria, and the steps with their skills.
+  Put all startup instructions in the goal and criteria before creating the
+  engineer: creation starts work immediately, with no follow-up decision needed.
 - **Work:** the engineer works each step in its own chat and submits it with
   `grove_submit`. Grove checks the output against the step's contract, records
   it on the board, and opens the review or starts the next step.
@@ -445,6 +447,8 @@ you ──► Chief of Staff ──► T1 engineer ── plan · execute · ver
   Decisions that change the engineer's work (changes, note, question, hold,
   cancel) steer its active turn; the rest queue. The engineer reads the already
   applied decision and follows the human's intent, adapting the workflow if needed.
+  The returned native message includes its `delivery` field; automatic
+  notification retries use the same policy.
 - **Relays are pointers.** Host messages can be clipped or arrive out of
   order, so a relay only carries its marker and tells the engineer to call
   `grove_next`, whose `decisions` and `reviews` fields hold the full text.

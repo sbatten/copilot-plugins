@@ -1,6 +1,6 @@
 {
   "name": "grove",
-  "version": "0.27.0",
+  "version": "0.27.1",
   "description": "A live pixel-art forest with autonomous engineer sessions, independent reviews and rich reports, coordinated by a Chief of Staff.",
   "repository": "https://github.com/sbatten/copilot-plugins",
   "agents": "agents/",
