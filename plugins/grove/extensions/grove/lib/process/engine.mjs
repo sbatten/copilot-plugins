@@ -1043,7 +1043,10 @@ export class ProcessEngine {
         if (k.status === 'dispatched' && at - k.dispatchedAt > CLAIM_TIMEOUT_MS) {
           const m = t.members[k.member];
           if (m) m.status = 'lost';
-          this.failTicket(t, k, 'its session never started the work');
+          // Grove claims a hire as soon as the new chat's prompt reaches its hook, so a chat the host created
+          // that never claimed one received the bare hire text: Grove isn't loaded there.
+          const created = k.via === 'create_session' && k.link;
+          this.failTicket(t, k, created ? 'Grove was not loaded in its new chat, so it never received its brief' : 'its session never started the work');
           n += 1;
         } else if (k.status === 'running' && at - (k.heartbeatAt ?? k.startedAt) > HEARTBEAT_TIMEOUT_MS) {
           this.failTicket(t, k, 'its session stopped responding');

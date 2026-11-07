@@ -55,6 +55,12 @@ Use native host tools and normal host approvals; Grove adds no tool-denial layer
 - If a reviewer is inaccessible, call `grove_recover` with its `reviewer`
   specialty and a `note`, then create the returned replacement. Existing findings
   and forum history remain; a failed chat is not a reason to require the human.
+- A reviewer that says Grove is not loaded, or a hire that failed because Grove
+  was not loaded in its new chat, is a host plugin-loading problem: Grove
+  expands the brief inside the reviewer's chat, and identical hires in the same
+  session fail the same way. Check the chat with `get_session_context` and recover
+  once. If a fresh reviewer still gets no brief, use `grove_blocked` to ask the
+  human to reload your session so it picks up the installed plugins.
 - Once you resolve a recorded prerequisite, `grove_recover` with `note` resumes
   it. Do not use recovery to ignore a human hold or waive unresolved objections.
 - Tracking errors do not stop useful work. Continue independent work, retry the

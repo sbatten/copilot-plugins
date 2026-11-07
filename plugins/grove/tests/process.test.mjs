@@ -190,7 +190,7 @@ assert.equal(res.data.task, 'T1');
 assert.equal(res.data.name, 'Tansy');
 assert.equal(chief.proc.role, 'chief');
 const handoff1 = res.data.handoff.prompt;
-assert.match(handoff1, /^\[grove-engineer:chief-1\/T1\/[a-f0-9]+\] Grove task Tansy \(T1\): Add dark mode\. Grove fills in your brief\.$/);
+assert.match(handoff1, /^\[grove-engineer:chief-1\/T1\/[a-f0-9]+\] Grove task Tansy \(T1\): Add dark mode\. Grove fills in your brief\. If Grove adds nothing else, it is not loaded in this chat: say so in one line and end your turn\.$/);
 assert.equal(res.data.handoff.title, 'Tansy · Add dark mode', 'the engineer session is titled by name');
 assert.match(res.data.guidance, /tell the human Tansy \(T1\) has started .*calling it by its name, Tansy/);
 assert.equal(res.data.handoff.relationship, 'independent');
@@ -291,8 +291,10 @@ assert.equal(sprite(eng, 'grove-engineer-T1').activity, 'plan-review', 'the engi
 assert.equal(sprite(eng, 'grove-engineer-T1').group, 'T1:S1');
 const rev = {};
 for (const x of res.data.hires) {
+  assert.match(x.prompt, /If Grove adds nothing else, it is not loaded in this chat: say so in one line and end your turn\.$/, 'a chat without Grove stops instead of asking for its brief');
   const m = await dispatch(eng, x);
   rev[x.title.replace(/^Tansy · | reviewer$/g, '').toLowerCase()] = m;
+  assert.doesNotMatch(m.brief, /not loaded in this chat/, 'Grove replaces the hire text with the brief');
   assert.match(m.brief, /^\[grove:T1-rev-[a-z]+-\d+\]\n# Grove review/);
   assert.match(m.brief, /## How Grove reviews work\n# Reviewing in a Grove forum/, 'every reviewer gets the grove-review skill');
   assert.match(m.brief, /## Under review: S1 · Plan \(v1\)\n# Plan\nStep details/);

@@ -175,10 +175,14 @@ export const LEAD_MARKER = /\[grove-engineer:([A-Za-z0-9][A-Za-z0-9._-]{0,127})\
 const templateLine = (name) => TEMPLATES[name].map((st) => `${KIND_LABELS[st.kind]}${st.reviewers?.length ? ` (reviewed by ${st.reviewers.join(', ')})` : ''}`).join(' → ');
 const KIND_WORDS = { code: 'a code change', research: 'research', other: 'other work' };
 
+// Grove replaces a hand-off prompt with the full brief in the receiving chat, so a model only reads this
+// when Grove isn't loaded there. It should report that instead of waiting on the human for a brief.
+const NO_BRIEF = 'If Grove adds nothing else, it is not loaded in this chat: say so in one line and end your turn.';
+
 // The first prompt of an engineer session, as the Chief passes it to create_session. The marker binds the
 // session to the task on the shared board; Grove expands it into the full brief (engineerBrief).
 export function engineerHandoff(task, { boardId, token }) {
-  return `[grove-engineer:${boardId}/${task.id}/${token}] Grove task ${taskLabel(task)}: ${task.title}. Grove fills in your brief.`;
+  return `[grove-engineer:${boardId}/${task.id}/${token}] Grove task ${taskLabel(task)}: ${task.title}. Grove fills in your brief. ${NO_BRIEF}`;
 }
 
 export function engineerBrief(task, { boardId, token }) {
@@ -413,7 +417,7 @@ export function hireMarker(boardId, ticket) {
 
 export function hireInstruction(task, ticket, { boardId, route }) {
   const role = `${ticket.specialty} reviewer of ${ticket.step}`;
-  const text = `${hireMarker(boardId, ticket)} Grove assignment ${ticket.id} for ${taskLabel(task)} (${role}). Grove fills in your full brief.`;
+  const text = `${hireMarker(boardId, ticket)} Grove assignment ${ticket.id} for ${taskLabel(task)} (${role}). Grove fills in your full brief. ${NO_BRIEF}`;
   const base = { ticket: ticket.id, task: task.id, role, attempt: ticket.attempt };
   if (route.tool === 'send_message') return { ...base, tool: 'send_message', session: route.session, message: text, delivery: relayDelivery('hire') };
   const model = memberModel(task, ticket);

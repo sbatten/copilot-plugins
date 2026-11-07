@@ -3,7 +3,7 @@
 // blockers, questions, shipping through a PR, review churn limits and host message limits.
 import assert from 'node:assert/strict';
 import {
-  ProcessEngine, MAX_STEP_ROUNDS, RATE_LIMIT_BACKOFF_MS, TEMPLATES, parseBlocked, parsePr, prSummary, prLine, stageLabel, currentStep,
+  ProcessEngine, MAX_STEP_ROUNDS, RATE_LIMIT_BACKOFF_MS, CLAIM_TIMEOUT_MS, TEMPLATES, parseBlocked, parsePr, prSummary, prLine, stageLabel, currentStep,
 } from '../extensions/grove/lib/process/engine.mjs';
 
 const board = { root: '/board', saveTask: async () => {}, flush: async () => {} };
@@ -198,6 +198,21 @@ engine.bindToolCall('c3', retry.id);
 engine.dispatchEnded({ toolCallId: 'c3', success: false, error: 'Unknown chat owner: ahp-chat:/code' });
 assert.equal(t.members['reviewer-code'].status, 'lost', 'a chat that is gone is replaced');
 assert.deepEqual(engine.route(t, t.tickets.at(-1)), { tool: 'create_session' });
+
+// ---- a hire that is never claimed: a created chat without Grove is named, not a vague timeout ----
+t = task({ steps: [{ kind: 'execute', reviewers: ['code'] }] });
+await submit(t, LONG('Implemented'));
+k = working(t)[0];
+engine.authorizeHire({ marker: k.id, tool: 'create_session' });
+engine.bindToolCall('c4', k.id);
+engine.dispatchEnded({ toolCallId: 'c4', success: true, link: 'agent-host-session://ahp-session/M?chat=code' });
+engine.sweep(k.dispatchedAt + CLAIM_TIMEOUT_MS + 1);
+assert.equal(k.failure, 'Grove was not loaded in its new chat, so it never received its brief');
+k = t.tickets.at(-1);
+assert.equal(k.status, 'issued', 'retried as usual');
+engine.authorizeHire({ marker: k.id, tool: 'create_session' });
+engine.sweep(k.dispatchedAt + CLAIM_TIMEOUT_MS + 1);
+assert.equal(k.failure, 'its session never started the work', 'no chat was created, so Grove is not blamed');
 
 // ---- shipping ----
 // Deliver a task's work; a code change opens its draft PR first (`draft`: the engineer's last line).

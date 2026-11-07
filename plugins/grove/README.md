@@ -489,6 +489,13 @@ Chief turn; unchanged refreshes do not broadcast another state.
   `grove_handoff` reloads the board first but is not a cross-process
   transaction. If the host registers the Grove provider twice, both copies
   run; Grove does not deduplicate them yet.
+- **Grove must load in every chat it hands work to.** Hand-off prompts carry
+  only a marker; the receiving chat's own Grove expands it into the brief. If
+  the host starts a reviewer chat without the plugin (seen after a plugin
+  update while the engineer's session stayed open), the reviewer says so in one
+  line and ends its turn instead of asking for a brief. The hire fails with
+  "Grove was not loaded in its new chat" after the claim timeout, and the
+  engineer recovers or asks the human to reload its session.
 - **Native hand-offs are visible.** Session creation and model-to-model
   `send_message` calls appear in the host, so the human can follow the work.
   - **Why not wake sessions directly?** Turns an extension starts itself (the
@@ -692,7 +699,8 @@ The canvas shows the team at work. Your **inbox** lives on the Chief of Staff:
     count when it repeats. Reviewers report it in their heartbeats, and an
     engineer's is stored on its task, so the Chief's grove sees both.
   - **Failed hires:** a hire that failed, for example because the host's
-    message limit was hit or the session never started. The reason shows until
+    message limit was hit, the session never started, or Grove was not loaded
+    in the reviewer's new chat. The reason shows until
     the retry starts, even if the reviewer never got a chat.
   - **Stalled tasks:** an engineer that stopped responding.
   - **Tracking delays:** the board could not be read or reconciled. The delay
