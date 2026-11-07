@@ -1,12 +1,12 @@
-# Grove Marketplace
+# Copilot Plugins
 
 A Copilot plugin marketplace containing one plugin:
-[Grove Agent Monitor](plugins/grove/README.md), which pairs Chief
+[Grove](plugins/grove/README.md), which pairs Chief
 of Staff orchestration with a live pixel-art forest canvas.
 
 ## Install
 
-Add `sbatten/grove-agent-monitor` as a marketplace in Copilot's plugin manager,
+Add `sbatten/copilot-plugins` as a marketplace in Copilot's plugin manager,
 then install `grove@grove`.
 
 To refresh the marketplace catalog and update an existing Copilot-managed

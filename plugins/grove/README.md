@@ -1,4 +1,4 @@
-# Grove Agent Monitor
+# Grove
 
 A Copilot plugin that pairs a **Chief of Staff orchestration workflow** with a
 **hi-detail pixel-art canvas** (480×320, crisp at any panel size) that shows it happening. The canvas is
@@ -627,7 +627,7 @@ The canvas shows the team at work. Your **inbox** lives on the Chief of Staff:
 ### Install in VS Code
 
 1. Open the **Agent Customizations** editor and select **Plugins**.
-2. Add `sbatten/grove-agent-monitor` as a plugin marketplace, then install
+2. Add `sbatten/copilot-plugins` as a plugin marketplace, then install
    **grove** from that marketplace using the Copilot plugin manager.
 3. If you previously installed Grove directly through Copilot, remove that
    installation before installing the marketplace copy to avoid duplicates.
