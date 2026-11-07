@@ -10,7 +10,7 @@ const opt = (name) => {
   return i >= 0 ? args[i + 1] : undefined;
 };
 const here = path.dirname(fileURLToPath(import.meta.url));
-const webDir = path.resolve(opt('--web') ?? path.join(here, '../../../extensions/grove/web'));
+const webDir = path.resolve(opt('--web') ?? path.join(here, '../../../../plugins/grove/extensions/grove/web'));
 const only = opt('--id');
 
 const { listSprites, spriteErrors } = await import(pathToFileURL(path.join(webDir, 'engine/sprites.mjs')));

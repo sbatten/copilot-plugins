@@ -5,6 +5,9 @@ description: 'Author, animate, palette-swap and place hi-detail pixel-art sprite
 
 # Grove sprite system
 
+This is a repository-only skill for maintaining Grove's artwork, not a skill
+bundled with the installed plugin. Run commands from the repository root.
+
 The Grove is a **480×320** pixel-art forest clearing, in the spirit of modern,
 detailed pixel-art games such as Sea of Stars and Eastward rather than strict
 handheld limits.
@@ -15,25 +18,26 @@ handheld limits.
 Everything is drawn in code: there are no image files, every pixel is crisp,
 and nothing is anti-aliased. Only the light is soft.
 
-Paths below are relative to the plugin root:
+Paths in this table are relative to the repository root. Elsewhere, abbreviated
+engine, sprite and scene paths refer to `plugins/grove/extensions/grove/web/`.
 
 | What | Where |
 | --- | --- |
-| Palette, hue-shifted material ramps, robe swaps | `extensions/grove/web/engine/palette.mjs` |
-| **Painter** (shaded shapes → token grids, contact shadows, selective outline) | `extensions/grove/web/engine/paint.mjs` |
-| Sprite compiler / renderer, soft glow | `extensions/grove/web/engine/sprites.mjs` |
-| Halo, value noise, PRNG helpers | `extensions/grove/web/engine/dither.mjs` |
-| Proportional 5×7 pixel font, UI panels | `extensions/grove/web/engine/font.mjs` |
-| Domain model (activities, stations, roles, themes) | `extensions/grove/web/model.mjs` (shared with the server) |
-| Sprite definitions | `extensions/grove/web/sprites/*.mjs` (registered in `sprites/index.mjs`) |
-| Character classes (24×32) | `extensions/grove/web/sprites/characters.mjs` |
-| Workstation sprites | `extensions/grove/web/sprites/stations.mjs` |
-| Station positions, agent spots, path graph | `extensions/grove/web/scene/layout.mjs` |
-| Static world painting per theme | `extensions/grove/web/scene/world.mjs` |
-| Walking actors | `extensions/grove/web/scene/actors.mjs` |
-| Scene composition, effects, UI | `extensions/grove/web/scene/grove.mjs` |
-| Sprite gallery view | `extensions/grove/web/scene/gallery.mjs` |
-| Validator / linter | `skills/grove-sprites/scripts/validate-sprites.mjs` |
+| Palette, hue-shifted material ramps, robe swaps | `plugins/grove/extensions/grove/web/engine/palette.mjs` |
+| **Painter** (shaded shapes → token grids, contact shadows, selective outline) | `plugins/grove/extensions/grove/web/engine/paint.mjs` |
+| Sprite compiler / renderer, soft glow | `plugins/grove/extensions/grove/web/engine/sprites.mjs` |
+| Halo, value noise, PRNG helpers | `plugins/grove/extensions/grove/web/engine/dither.mjs` |
+| Proportional 5×7 pixel font, UI panels | `plugins/grove/extensions/grove/web/engine/font.mjs` |
+| Domain model (activities, stations, roles, themes) | `plugins/grove/extensions/grove/web/model.mjs` (shared with the server) |
+| Sprite definitions | `plugins/grove/extensions/grove/web/sprites/*.mjs` (registered in `sprites/index.mjs`) |
+| Character classes (24×32) | `plugins/grove/extensions/grove/web/sprites/characters.mjs` |
+| Workstation sprites | `plugins/grove/extensions/grove/web/sprites/stations.mjs` |
+| Station positions, agent spots, path graph | `plugins/grove/extensions/grove/web/scene/layout.mjs` |
+| Static world painting per theme | `plugins/grove/extensions/grove/web/scene/world.mjs` |
+| Walking actors | `plugins/grove/extensions/grove/web/scene/actors.mjs` |
+| Scene composition, effects, UI | `plugins/grove/extensions/grove/web/scene/grove.mjs` |
+| Sprite gallery view | `plugins/grove/extensions/grove/web/scene/gallery.mjs` |
+| Validator / linter | `.github/skills/grove-sprites/scripts/validate-sprites.mjs` |
 
 ## Art direction
 
@@ -134,7 +138,7 @@ defineSprite({
 });
 ```
 
-Then import the module from `web/sprites/index.mjs` if it's new.
+Then import the module from `plugins/grove/extensions/grove/web/sprites/index.mjs` if it's new.
 
 ### Painter reference (`engine/paint.mjs`)
 
@@ -477,8 +481,8 @@ information. Empty stations dim, and their labels fade to `stone2`.
 
 ## Workflow
 
-1. **Edit** a sprite in `web/sprites/*.mjs`, or add a new module and import it from `sprites/index.mjs`.
-2. **Validate:** `node skills/grove-sprites/scripts/validate-sprites.mjs`.
+1. **Edit** a sprite in `plugins/grove/extensions/grove/web/sprites/*.mjs`, or add a new module and import it from `sprites/index.mjs`.
+2. **Validate:** `node .github/skills/grove-sprites/scripts/validate-sprites.mjs`.
    - Add `--id <sprite>` to check one sprite.
    - It reports malformed rows, unmapped chars or tokens, bad slots/variants,
      anchors out of bounds, unused keys, and variants over ~48 colours.

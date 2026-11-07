@@ -30,6 +30,9 @@ Chief of Staff chat after installing the renamed plugin.
 
 ```text
 marketplace.json
+.github/
+  skills/
+    grove-sprites/      # repository-only artwork guidance and validator
 plugins/
   grove/
     .plugin/plugin.json
@@ -49,11 +52,13 @@ live inside that directory; the repository root is not itself a plugin.
 From the repository root:
 
 ```sh
-cd plugins/grove
-node --test tests/*.test.mjs
-node skills/grove-sprites/scripts/validate-sprites.mjs
-node --check extensions/grove/extension.mjs
+node --test plugins/grove/tests/*.test.mjs
+node .github/skills/grove-sprites/scripts/validate-sprites.mjs
+node --check plugins/grove/extensions/grove/extension.mjs
 ```
+
+The [grove-sprites repository skill](.github/skills/grove-sprites/SKILL.md)
+supports maintaining Grove's artwork; it is not shipped with the plugin.
 
 See the [plugin documentation](plugins/grove/README.md) for workflow
 details and individual test commands. When publishing a release, keep the plugin

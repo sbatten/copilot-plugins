@@ -70,8 +70,15 @@ for (const f of files) {
 // The engineer loads one skill per kind of step; reviewers get grove-review in their brief. Each skill's front
 // matter must parse, and its name must match its folder.
 const skillsDir = new URL(plugin.skills, root);
-for (const name of ['grove-plan', 'grove-research', 'grove-execute', 'grove-verify', 'grove-review']) {
-  const text = await fs.readFile(new URL(`${name}/SKILL.md`, skillsDir), 'utf8');
+const runtimeSkills = ['grove-plan', 'grove-research', 'grove-execute', 'grove-verify', 'grove-review'];
+const bundledSkills = (await fs.readdir(skillsDir, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+assert.deepEqual(bundledSkills.sort(), [...runtimeSkills].sort(), 'only runtime workflow/review skills are bundled with the plugin');
+const skillLocations = [
+  ...runtimeSkills.map((name) => [name, new URL(`${name}/`, skillsDir)]),
+  ['grove-sprites', new URL('.github/skills/grove-sprites/', marketplaceRoot)],
+];
+for (const [name, skillDir] of skillLocations) {
+  const text = await fs.readFile(new URL('SKILL.md', skillDir), 'utf8');
   const m = /^---\n([\s\S]*?)\n---\n/.exec(text);
   assert.ok(m, `${name}: missing front matter`);
   assert.match(m[1], new RegExp(`^name: ${name}$`, 'm'), `${name}: name matches the folder`);

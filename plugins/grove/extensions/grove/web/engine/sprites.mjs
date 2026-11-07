@@ -5,7 +5,7 @@
 // Slots (e.g. "robe2") can be re-pointed by variants for palette swaps. Emissive characters/tokens also
 // feed the soft glow layer.
 //
-// See skills/grove-sprites/SKILL.md for the authoring guide.
+// See .github/skills/grove-sprites/SKILL.md in the source repository for the authoring guide.
 
 import { PALETTE } from './palette.mjs';
 import { hexToRgb, makeCanvas } from './dither.mjs';

@@ -762,11 +762,6 @@ The plugin also includes the engineer's phase skills (`grove-plan`,
 `grove-review`. They work outside Grove too: for example, ask any chat to
 "verify this change with evidence" and it can use `grove-verify`.
 
-And it includes the **`grove-sprites` skill**. It documents the
-painted hi-detail sprite system (procedural painter, hue-shifted ramps, soft glow), character classes, workstation layout and art
-direction, plus the workflow for validating sprites, viewing them, and
-capturing snapshots.
-
 ## Contents
 
 Paths below are relative to this plugin's directory, `plugins/grove/`.
@@ -786,9 +781,6 @@ tests/agents.test.mjs    # agent and skill front matter
 skills/grove-plan/, grove-research/, grove-execute/, grove-verify/   # the engineer's phase skills
   grove-verify/scripts/check-evidence.mjs                            # checks evidence.json the way Grove does
 skills/grove-review/     # how reviewers review (Grove adds it to every reviewer's brief)
-skills/grove-sprites/
-  SKILL.md               # Sprite system + art direction
-  scripts/validate-sprites.mjs
 ```
 
 ## Canvas reference
@@ -852,6 +844,11 @@ Writes are atomic, and each file includes a format marker and version.
 
 ## Development
 
+The [grove-sprites repository skill](../../.github/skills/grove-sprites/SKILL.md)
+documents artwork authoring, animation, palettes, layout and visual validation
+for contributors. It lives outside the plugin and is not installed into users'
+projects. Its validator resolves the source assets relative to its own location.
+
 Run these commands from `plugins/grove/`:
 
 ```sh
@@ -866,7 +863,7 @@ node tests/report.test.mjs                               # task report, report/e
 node tests/relay-delivery.test.mjs                       # native messaging, full review/decision delivery and restarts
 node tests/relay-outcome.test.mjs                        # host send results: accepted, cannotSteer, redaction
 node tests/decision-text.test.mjs                        # inbox decision lines and toasts
-node skills/grove-sprites/scripts/validate-sprites.mjs   # lint sprites
+node ../../.github/skills/grove-sprites/scripts/validate-sprites.mjs   # repository sprite validator
 node --check extensions/grove/extension.mjs
 ```
 
