@@ -7,14 +7,14 @@ of Staff orchestration with a live pixel-art forest canvas.
 ## Install
 
 Add `sbatten/copilot-plugins` as a marketplace in Copilot's plugin manager,
-then install `grove@grove`.
+then install `grove@sbatten`.
 
 To refresh the marketplace catalog and update an existing Copilot-managed
 installation:
 
 ```text
-/plugin marketplace update grove
-/plugin update grove@grove
+/plugin marketplace update sbatten
+/plugin update grove@sbatten
 ```
 
 Refreshing the catalog and updating the installed plugin are separate operations.

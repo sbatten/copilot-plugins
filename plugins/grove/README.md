@@ -649,8 +649,8 @@ keep its plugin version and description aligned with this plugin's
 Adding the marketplace does not migrate an existing direct installation.
 
 For a Copilot-managed installation, refresh the marketplace catalog with
-`/plugin marketplace update grove`, then update the installed copy with
-`/plugin update grove@grove`.
+`/plugin marketplace update sbatten`, then update the installed copy with
+`/plugin update grove@sbatten`.
 
 ### Start a task
 
