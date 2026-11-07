@@ -11,6 +11,14 @@ import { parseModels } from '../extensions/grove-agent-monitor/lib/process/model
 
 const root = new URL('../', import.meta.url);
 const plugin = JSON.parse(await fs.readFile(new URL('.plugin/plugin.json', root), 'utf8'));
+const marketplace = JSON.parse(await fs.readFile(new URL('marketplace.json', root), 'utf8'));
+assert.equal(marketplace.plugins.length, 1, 'the marketplace exposes one bundled plugin');
+for (const entry of marketplace.plugins) {
+  const manifest = JSON.parse(await fs.readFile(new URL('.plugin/plugin.json', new URL(entry.source, root)), 'utf8'));
+  for (const key of ['name', 'version', 'description']) {
+    assert.equal(entry[key], manifest[key], `marketplace ${key} matches the plugin at its source`);
+  }
+}
 assert.equal(plugin.name, 'grove-agent-monitor', 'the plugin has a stable install identity');
 assert.match(plugin.version, /^\d+\.\d+\.\d+$/, 'the plugin declares a semantic version');
 assert.ok(plugin.description?.trim(), 'the plugin has a description');

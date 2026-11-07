@@ -627,15 +627,25 @@ The canvas shows the team at work. Your **inbox** lives on the Chief of Staff:
 ### Install in VS Code
 
 1. Open the **Agent Customizations** editor and select **Plugins**.
-2. Select the add (`+`) button next to **User** or **Workspace**, then install
-   from `https://github.com/sbatten/grove-agent-monitor` or choose this local
-   repository folder.
-3. Use the **Copilot** agent harness with SDK extension and canvas support.
+2. Add `sbatten/grove-agent-monitor` as a plugin marketplace, then install
+   **grove-agent-monitor** from that marketplace. This registers the installation
+   with VS Code's **Check for Updates** command.
+3. If you previously installed Grove directly through Copilot, remove that
+   installation before installing the marketplace copy to avoid duplicates.
+4. Use the **Copilot** agent harness with SDK extension and canvas support.
    The plugin needs the VS Code agent host's session tools.
+
+For local development, you can instead select the add (`+`) button next to
+**User** or **Workspace** and choose this repository folder.
 
 The manifest at `.plugin/plugin.json` uses VS Code's supported OpenPlugin
 format. Its component paths are relative to the repository root and register
 the bundled agents, skills, and SDK extension together.
+
+The root `marketplace.json` lists the repository itself (`"./"`) as its only
+plugin, so no separate plugin directory is needed. When publishing a release,
+keep its plugin version and description aligned with `.plugin/plugin.json`.
+Adding the marketplace does not migrate an existing direct installation.
 
 ### Start a task
 
