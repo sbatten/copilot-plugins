@@ -47,7 +47,7 @@ import {
 import { taskName, taskLabel, taskTag, findTask } from './names.mjs';
 import { writeReport, reportPath, evidenceRel } from './report.mjs';
 import { TASK_COLORS } from '../../web/model.mjs';
-import { Board, BoardError, newHandoffToken, readLeadLink, writeLeadLink, readMemberLink, writeMemberLink } from './board.mjs';
+import { Board, BoardError, newHandoffToken, readChiefLink, writeChiefLink, readLeadLink, writeLeadLink, readMemberLink, writeMemberLink } from './board.mjs';
 
 const SUBAGENT_TOOLS = /^(task|agent|runsubagent|run_subagent|custom-agent|launch_agent|subagent)$/i;
 const HIRE_TOOLS = new Set(['create_session', 'send_message']);
@@ -367,6 +367,7 @@ export class GroveProcess {
     this.selfId = session.sessionId;
     this.filesRoot = resolveFilesRoot(session);
     this.chiefRoot = path.join(this.filesRoot, 'grove');
+    this.chiefFile = path.join(this.filesRoot, 'grove-chief.json');
     this.leadFile = path.join(this.filesRoot, 'grove-lead.json');
     this.memberFile = path.join(this.filesRoot, 'grove-member.json');
     session.on((ev) => {
@@ -377,9 +378,10 @@ export class GroveProcess {
       }
     });
     try {
-      if (await Board.exists(this.chiefRoot)) {
-        await this.becomeChief();
-        await this.relayToChief();
+      const chief = await readChiefLink(this.chiefFile);
+      if (chief || await Board.exists(this.chiefRoot)) {
+        await this.becomeChief(chief ? await Board.resolve(chief.boardId, this.log) : undefined);
+        if (this.role === 'chief') await this.relayToChief();
       } else {
         const lead = await readLeadLink(this.leadFile);
         if (lead) await this.becomeLead(lead, { resume: true });
@@ -415,10 +417,35 @@ export class GroveProcess {
     this.onChange();
   }
 
-  async becomeChief() {
-    const board = await Board.openOrCreate(this.chiefRoot, { id: this.selfId, chiefSessionId: this.selfId, log: this.log });
+  async becomeChief(existing) {
+    const resumed = existing ? null : await readChiefLink(this.chiefFile);
+    const board = existing ?? (resumed
+      ? await Board.resolve(resumed.boardId, this.log)
+      : await Board.openOrCreate(this.chiefRoot, { id: this.selfId, chiefSessionId: this.selfId, log: this.log }));
+    if (board.meta.chiefSessionId !== this.selfId) {
+      await this.bind(board, 'none');
+      return;
+    }
+    board.chiefWriter = this.selfId;
     await this.bind(board, 'chief');
+    for (const t of this.engine.state.tasks) {
+      if (t.lead || this.engine.owns(t)) continue;
+      const previous = t.owner;
+      t.owner = this.selfId;
+      await board.saveTask(t, previous);
+    }
     await this.reconcileRelays();
+  }
+
+  async checkChief() {
+    if (this.role !== 'chief') return;
+    try {
+      await this.board.assertChief();
+    } catch (err) {
+      if (err.code !== 'not_chief') throw err;
+      await this.bind(await Board.resolve(this.board.id, this.log), 'none');
+      throw err;
+    }
   }
 
   // Chief: a decision is written to the board before it is applied or its relay tracked, so after a restart
@@ -831,6 +858,7 @@ export class GroveProcess {
   async pollOnce() {
     try {
       this.polls += 1;
+      await this.checkChief();
       if (this.engine) {
         const { lost } = await this.engine.refresh();
         if (this.role === 'lead' && lost.includes(this.leadTaskId)) this.retire();
@@ -1552,6 +1580,10 @@ export class GroveProcess {
       },
       onPreToolUse: async (input) => {
         if (!isRootCall(input, this.selfId)) return undefined;
+        try { await this.checkChief(); } catch (err) {
+          if (err.code === 'not_chief') return deny(`Grove: ${err.message}`);
+          throw err;
+        }
         if (this.engine) await this.engine.refresh();
         if (input?.workingDirectory) this.workingDirectory = input.workingDirectory;
         const name = String(input?.toolName ?? '');
@@ -1788,6 +1820,8 @@ export class GroveProcess {
         return { textResultForLlm: `Grove: ${who}; this tool is for ${roles.filter((r) => r !== 'none').map((r) => ROLE_NAMES[r]).join(' or ')}.`, resultType: 'failure' };
       }
       try {
+        await this.checkChief();
+        if (!roles.includes(this.role)) throw new ProcessError('not_chief', 'This session is now read-only.');
         if (this.engine) await this.engine.refresh();
         const task = this.role === 'lead' ? this.leadTask() : null;
         if (task && !readOnly && (TERMINAL.has(task.stage) || task.stage === 'on-hold' || task.stage === 'shelved')) {
@@ -1841,7 +1875,10 @@ export class GroveProcess {
             throw new ProcessError('invalid_input', 'Pass chiefSession: call get_current_session and use its openLink, so the engineer can message you when the human is needed.');
           }
           const target = destination(intent);
-          if (this.role !== 'chief') await this.becomeChief();
+          if (this.role !== 'chief') {
+            await this.becomeChief();
+            if (this.role !== 'chief') throw new ProcessError('not_chief', 'This Grove has another Chief of Staff. Use grove_resume with explicit human permission to take it over.');
+          }
           if (isSessionLink(chiefSession)) this.board.meta.chiefLink = chiefSession.split('?')[0];
           const n = this.board.meta.nextTask++;
           const id = `T${n}`;
@@ -1853,6 +1890,24 @@ export class GroveProcess {
           const t = this.engine.createTask({ id, name: taskName(this.board.id, n), title, goal, criteria: criteria ?? [], kind, destination: target, chiefDirectory: this.leadWorkspace() });
           await this.board.flush();
           return { task: id, name: t.name, handoff: this.handoff(t, token), guidance: this.handoffGuidance(t) };
+        }),
+      },
+      {
+        name: 'grove_resume',
+        description: 'Chief of Staff: with the human\'s permission, resume an existing Grove in this fresh session. Keeps all tasks and engineers, routes future notices here, and makes the previous chief read-only. Call before creating new tasks.',
+        parameters: { type: 'object', properties: {
+          boardId: { type: 'string', description: 'Board id from grove_status; omit to resume the board currently shown in this Grove.' },
+          chiefSession: { type: 'string', description: 'Your own openLink from get_current_session.' },
+        }, required: ['chiefSession'] },
+        handler: guarded(['chief', 'none'], async ({ boardId, chiefSession }) => {
+          if (!isSessionLink(chiefSession)) throw new ProcessError('invalid_input', 'Pass chiefSession: your own openLink from get_current_session.');
+          const board = boardId !== undefined ? await Board.resolve(boardId, this.log) : this.board;
+          if (!board) throw new ProcessError('not_found', 'No Grove board to resume. Pass boardId from grove_status.');
+          if (this.role === 'chief' && this.board.id !== board.id) throw new ProcessError('invalid_state', 'This session already manages another Grove. Resume that board in a fresh session.');
+          await writeChiefLink(this.chiefFile, board.id);
+          await board.resumeChief(this.selfId, chiefSession.split('?')[0]);
+          await this.becomeChief(board);
+          return { boardId: board.id, ...this.status(), guidance: 'This session now manages the existing Grove. Record the human\'s decisions as usual; existing engineers and hand-offs are unchanged.' };
         }),
       },
       {
@@ -1894,7 +1949,7 @@ export class GroveProcess {
         handler: guarded(['chief', 'lead', 'none'], async ({ taskId: id }) => {
           if (!this.engine) return { tasks: [], waitingOnHuman: [] };
           await this.engine.refresh();
-          return this.status(id ?? (this.role === 'lead' ? this.leadTaskId : undefined));
+          return { boardId: this.board.id, ...this.status(id ?? (this.role === 'lead' ? this.leadTaskId : undefined)) };
         }, true),
       },
       {
@@ -2174,6 +2229,7 @@ export class GroveProcess {
   // The human acted on a task from the Grove inbox: "complete" signs it off (or accepts an escalated step),
   // "dismiss" drops it. Only the Chief of Staff's own session records decisions.
   async inboxDecide(taskId, action) {
+    await this.checkChief();
     if (this.role !== 'chief') throw new ProcessError('not_chief', 'Only the Chief of Staff\'s Grove can decide. Open the Grove from the Chief of Staff\'s chat.');
     const decision = INBOX_ACTIONS[action];
     if (!decision) throw new ProcessError('invalid_input', `action must be ${Object.keys(INBOX_ACTIONS).join(', ')}.`);
@@ -2203,6 +2259,7 @@ export class GroveProcess {
   // tasks itself and adds them as context to the Chief's next human message (see onUserPromptSubmitted).
   // Only the Chief's own Grove can attach, because only its prompts pass through this process.
   async attachTask(taskId, { attach = true } = {}) {
+    await this.checkChief();
     if (this.role !== 'chief') throw new ProcessError('not_chief', 'Only the Chief of Staff\'s Grove can attach tasks to its chat. Open the Grove from the Chief of Staff\'s chat.');
     this.engine.task(taskId);
     if (attach) this.attached.set(taskId, Date.now());
@@ -2299,6 +2356,7 @@ export class GroveProcess {
   }
 
   async recordDecision(id, decision, note, { via = 'chat', ship, workspaceRepair, expectedStages } = {}) {
+    await this.checkChief();
     await this.engine.refresh();
     const initial = this.engine.task(id);
     let repair;

@@ -1,4 +1,4 @@
-// Shared Grove board. One board belongs to one Chief of Staff session and lives in that session's data
+// Shared Grove board. One board has one active Chief of Staff and lives in its original session's data
 // folder (`files/grove/`), next to the verification evidence. Engineers run in separate processes;
 // task snapshots and human decisions share a cross-process per-task lock and revision fence.
 //
@@ -217,6 +217,7 @@ export class Board {
   }
 
   async writeMeta() {
+    await this.assertChief();
     this.meta.updatedAt = Date.now();
     await writeJson(Board.metaFile(this.root), structuredClone(this.meta));
     await this.link();
@@ -236,6 +237,26 @@ export class Board {
     const meta = await readJson(Board.metaFile(this.root), FORMATS.board);
     if (validMeta(meta)) this.meta = meta;
     return this.meta;
+  }
+
+  async assertChief() {
+    if (!this.chiefWriter) return;
+    const meta = await readJson(Board.metaFile(this.root), FORMATS.board);
+    if (meta && meta.chiefSessionId !== this.chiefWriter) {
+      throw new BoardError('not_chief', 'This Grove has been resumed by another Chief of Staff. This session is now read-only.');
+    }
+  }
+
+  resumeChief(sessionId, chiefLink) {
+    return this.queue(async () => {
+      await this.reloadMeta();
+      this.meta.chiefSessionId = sessionId;
+      this.meta.chiefLink = chiefLink;
+      this.meta.updatedAt = Date.now();
+      await writeJson(Board.metaFile(this.root), structuredClone(this.meta));
+      await this.link();
+      this.chiefWriter = sessionId;
+    });
   }
 
   taskFile(id) {
@@ -371,6 +392,7 @@ export class Board {
   // commit before exposing state; no engineer turn is needed to finish it.
   decide(id, input, transition) {
     return this.queue(() => this.taskLock(id, async () => {
+      await this.assertChief();
       const task = input.action === 'cancel' ? await this.readTask(id) : await this.recoverTask(id);
       if (!task) throw new BoardError('not_found', `No task "${id}".`);
       const items = await this.readDecisions(id);
@@ -392,6 +414,7 @@ export class Board {
   saveTask(task, expectedOwner = task.owner, expectedRevision = task.revision ?? 0) {
     const snapshot = { format: FORMATS.task, version: VERSION, task: structuredClone(task) };
     return this.queue(() => this.taskLock(task.id, async () => {
+      await this.assertChief();
       if (this.staleTasks.has(task.id)) throw new BoardError('stale_task', `${task.id} needs a reload after a refused write.`);
       const current = await this.recoverTask(task.id);
       if (current && current.owner !== expectedOwner) throw new BoardError('not_owner', `${task.id} is now owned by another session.`);
@@ -445,6 +468,7 @@ export class Board {
   // lag the owner's save, so deduping them could silently drop a repeated, already-applied decision.
   appendDecision(taskId, { action, note, via = 'chat', ship, workspaceRepair }, { appliedThrough = 0 } = {}) {
     return this.queue(() => this.taskLock(taskId, async () => {
+      await this.assertChief();
       const items = await this.readDecisions(taskId);
       const same = via === 'grove' && !workspaceRepair && items.find((d) => d.seq > appliedThrough
         && d.action === action && d.via === via && (d.note ?? null) === (note ?? null) && d.ship === ship
@@ -491,6 +515,19 @@ export class Board {
 
 export function newHandoffToken() {
   return crypto.randomBytes(8).toString('hex');
+}
+
+const CHIEF_FORMAT = 'grove-agent-monitor/chief';
+
+export async function readChiefLink(file) {
+  const data = await readJson(file, CHIEF_FORMAT);
+  if (!data) return null;
+  if (!isBoardId(data.boardId)) throw new BoardError('storage_corrupt', `${file} is malformed; leaving it untouched.`);
+  return { boardId: data.boardId };
+}
+
+export function writeChiefLink(file, boardId) {
+  return writeJson(file, { format: CHIEF_FORMAT, version: VERSION, boardId });
 }
 
 // An engineer session remembers which board/task it works on in its own session folder.

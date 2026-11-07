@@ -705,6 +705,75 @@ assert.match((await eng5.call('grove_next')).data.guidance, /The human asked for
 
 // Authoritative human control, crash recovery and bounded notification are tested in control.test.mjs.
 
+// A fresh chief explicitly resumes an old board, rather than creating a separate Grove.
+const prior = await startSession('prior-chief');
+const priorTask = async (title) => {
+  const r = await prior.call('grove_create_task', { title, goal: title, kind: 'research', destination: { mode: 'scratch' }, chiefSession: prior.link });
+  assert.equal(r.ok, true, JSON.stringify(r.data));
+  return r.data;
+};
+const unclaimed = await priorTask('Unclaimed before restart');
+const running = await priorTask('Engineer survives chief restart');
+const pending = await priorTask('Decision recorded before chief was killed');
+await prior.proc.board.appendDecision(pending.task, { action: 'cancel', note: 'Already dismissed by the human.' });
+const survivor = await startSession('surviving-engineer');
+started(prior, survivor, running.handoff.prompt);
+await survivor.hooks.onUserPromptSubmitted({ prompt: running.handoff.prompt });
+await settle(prior, survivor);
+const originalToken = prior.proc.board.meta.handoffs[running.task];
+const fresh = await startSession('fresh-chief');
+assert.equal(fresh.proc.role, 'none');
+assert.equal((await fresh.call('grove_status')).data.boardId, prior.id);
+assert.equal((await fresh.call('grove_cancel_task', { taskId: unclaimed.task })).ok, false, 'viewing is not takeover');
+assert.equal((await survivor.call('grove_resume', { chiefSession: survivor.link })).ok, false, 'engineers cannot take over');
+assert.equal((await fresh.call('grove_resume', { chiefSession: 'bad-link' })).ok, false);
+res = await fresh.call('grove_resume', { boardId: prior.id, chiefSession: fresh.link });
+assert.equal(res.ok, true, JSON.stringify(res.data));
+assert.equal(fresh.proc.role, 'chief');
+assert.equal(fresh.proc.board.id, prior.id);
+assert.equal(fresh.proc.board.meta.handoffs[running.task], originalToken, 'engineer handoff is unchanged');
+assert.equal(fresh.proc.engine.task(running.task).owner, survivor.id, 'engineer retains ownership');
+assert.equal(fresh.proc.engine.task(unclaimed.task).owner, fresh.id, 'new chief owns unclaimed tasks');
+assert.equal(fresh.proc.engine.task(pending.task).stage, 'cancelled', 'pending decisions on unclaimed tasks are recovered');
+await assert.rejects(prior.proc.board.appendDecision(unclaimed.task, { action: 'cancel' }), /resumed by another Chief/);
+await assert.rejects(prior.proc.board.decide(unclaimed.task, { action: 'cancel' }, () => {
+  assert.fail('A replaced Chief must not enter the authoritative decision transaction.');
+}), /resumed by another Chief/);
+assert.equal((await prior.call('grove_cancel_task', { taskId: unclaimed.task })).ok, false, 'old chief cannot decide');
+assert.equal(prior.proc.role, 'none');
+assert.equal((await fresh.call('grove_cancel_task', { taskId: unclaimed.name })).ok, true, 'old task can be dismissed by name');
+await settle(fresh);
+assert.equal(fresh.proc.engine.task(unclaimed.task).stage, 'cancelled');
+assert.equal((await survivor.call('grove_blocked', { need: 'Human input', reason: 'Waiting' })).ok, true);
+const survivorMessages = await survivor.proc.leadMessages(survivor.proc.leadTask());
+assert.equal(survivorMessages[0].session, fresh.link, 'future notices target the replacement chief');
+assert.equal((await fresh.proc.inboxDecide(running.task, 'dismiss')).decision, 'cancel');
+assert.equal(fresh.proc.engine.task(running.task).stage, 'cancelled', 'takeover dismissal is immediate, before the engineer reads it');
+assert.ok(!fresh.proc.liveView().agents.some((a) => a.taskId === running.task), 'cancelled team leaves the replacement Chief canvas immediately');
+await survivor.call('grove_next');
+await settle(survivor);
+assert.equal(survivor.proc.engine.task(running.task).stage, 'cancelled', 'existing engineer applies new chief decision');
+await survivor.proc.board.reloadMeta();
+assert.equal(survivor.proc.board.meta.chiefLink, fresh.link, 'engineers route future notices to the new chief');
+res = await fresh.call('grove_create_task', { title: 'After restart', goal: 'Continue', kind: 'research', destination: { mode: 'scratch' } });
+assert.equal(res.ok, true, JSON.stringify(res.data));
+assert.equal(res.data.task, 'T4', 'task numbering continues on the existing board');
+await fresh.proc.dispose();
+const freshRestart = await startSession(fresh.id, { restart: fresh });
+assert.equal(freshRestart.proc.role, 'chief', 'resumed board survives process restart');
+assert.equal(freshRestart.proc.board.id, prior.id);
+assert.equal(freshRestart.proc.engine.task('T4').owner, fresh.id);
+await prior.proc.dispose();
+const priorRestart = await startSession(prior.id, { restart: prior });
+assert.equal(priorRestart.proc.role, 'none', 'old chief cannot reclaim the board by restarting');
+assert.equal((await priorRestart.call('grove_create_task', { title: 'No takeover', goal: 'No takeover', kind: 'research', destination: { mode: 'scratch' }, chiefSession: prior.link })).ok, false);
+const nextChief = await startSession('next-chief');
+assert.equal((await nextChief.call('grove_resume', { boardId: prior.id, chiefSession: nextChief.link })).ok, true);
+assert.equal((await freshRestart.call('grove_create_task', { title: 'No separate board', goal: 'No separate board', kind: 'research', destination: { mode: 'scratch' }, chiefSession: fresh.link })).ok, false);
+assert.equal((await freshRestart.call('grove_create_task', { title: 'Still read only', goal: 'Still read only', kind: 'research', destination: { mode: 'scratch' }, chiefSession: fresh.link })).ok, false, 'a resumed chief cannot silently create an unremembered board after replacement');
+await freshRestart.proc.dispose();
+await priorRestart.proc.dispose();
+
 // 17. A board from the earlier process (a task lead with persona sessions) isn't migrated: Grove leaves it
 //     untouched and says to start a new Chief of Staff chat.
 const oldRoot = path.join(tmp, 'old-chief', 'files', 'grove');
