@@ -371,6 +371,7 @@ export class ProcessEngine {
     next.sort((a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1)));
     this.state.tasks = next;
     if (changed.length) this.state.updatedAt = now();
+    if (changed.length || lost.length) this.onChange();
     return { changed, lost };
   }
 
