@@ -58,7 +58,7 @@ for (const f of files) {
   for (const k of ['name', 'description']) assert.ok(keys.has(k), `${f}: missing ${k}`);
   if (f === 'chief-of-staff.agent.md') {
     assert.ok(!keys.has('model'), 'the Chief uses the user-selected model instead of pinning one');
-    assert.ok(keys.has('tools'), 'the Chief keeps its coordination-only toolset');
+    assert.ok(!keys.has('tools'), 'delegation is instruction-based; native recovery tools remain available');
   } else {
     assert.ok(keys.has('model'), `${f}: missing model`);
     assert.ok(parseModels(text).length, `${f}: model must name at least one model id`);

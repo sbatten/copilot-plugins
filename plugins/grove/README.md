@@ -4,12 +4,16 @@ A Copilot plugin that pairs a **Chief of Staff orchestration workflow** with a
 **hi-detail pixel-art canvas** (480×320, crisp at any panel size) that shows it happening. The canvas is
 a calm, bioluminescent forest clearing.
 
+The beautiful, accurate live view is the primary experience. Autonomous engineers
+doing meaningful work and producing trustworthy reports are a close second.
+Neither is expendable. Tracking and workflow machinery support both; they must
+not prevent agents from recovering or following the human's instructions.
+
 ## The workflow
 
-You talk to one agent, the **Chief of Staff**. It never does work itself, and
-it never waits on agents. Grove holds it to that: it can only use Grove's
-tools, the session tools and the canvas (no shell, files, git or GitHub), so
-anything to do or find out goes to a task.
+You talk to one agent, the **Chief of Staff**. Its instructions say to delegate
+every request and never wait on agents, so it remains available. Grove does not
+add a tool-denial layer: agents use native host tools and normal host approvals.
 
 When you ask for something, the Chief:
 1. turns the request into tasks, each marked `code`, `research` or `other`;
@@ -21,14 +25,15 @@ Each **engineer** does its task from start to finish in its own chat: it plans,
 researches, implements and verifies, loading a **skill** for each kind of step.
 For an independent opinion it hires **reviewers**, each its own session (chat)
 that it keeps for the whole task, so a reviewer remembers what it said in
-earlier rounds. **One session = one sprite** in the grove.
+earlier rounds. **Sessions get sprites; subagents do not.** An engineer's character
+belongs to the task and survives replacement of its backing chat.
 
 In VS Code's session list, **each task is grouped under its engineer**:
 - **Engineers:** the Chief starts each engineer as an independent top-level
   session at its structured task destination (`relationship: "independent"`).
 - **Reviewers:** nested chats inside their engineer's session
   (`relationship: "currentSession"`), so a task's whole team sits together.
-- **Enforcement:** Grove's `preToolUse` hook sets this placement (and the
+- **Routing:** Grove's `preToolUse` hook supplies this placement (and the
   model) on every `create_session` call, so it doesn't depend on the model
   passing the right arguments. Destination is authoritative, not the Chief's
   cwd or a path mentioned in the goal.
@@ -40,41 +45,20 @@ Every new `grove_create_task` requires `destination`:
 | Mode | Workspace | Creation intent |
 | --- | --- | --- |
 | `new-worktree` | Absolute target repo | `worktree: true` |
-| `existing-worktree` | Exact authorized continuation checkout | Direct folder; verify actual attachment |
-| `read-only` | Absolute Git checkout folder | Direct folder; no new worktree needed |
+| `existing-worktree` | Continuation checkout | Direct folder |
+| `read-only` | Absolute research folder | Direct folder; no new worktree needed |
 | `scratch` | Omitted | Omit workspace/worktree; independent host scratch |
 
-Actual directory, Git identity, branch and HEAD are recorded separately.
-Unknown or mismatched attachment blocks work and review acceptance. Resume a
-correctly attached engineer for same-PR work; recovery carries its verified
-checkout, never defaults to main. Some hosts redirect independent
-`worktree: false` from a linked checkout to the primary root. That is a repair
-prerequisite, not successful reuse. Legacy boards retain reports/votes and active
-attachments; legacy recovery needs an explicit `grove_handoff` destination.
-`read-only` requires Git identity; non-repository work uses `scratch`.
-Ordinary branch changes or detached HEAD inside the verified engineer checkout
-remain allowed. Identity is refreshed at submission/dispatch and on directory
-changes, not reprobed or rewritten for every ordinary tool call.
+Grove supplies native workspace/worktree parameters and records the directory
+reported by the host. Recovery reuses that checkout instead of requesting
+another new worktree. It does not probe Git identity, gate tools on placement,
+or require a Grove repair flag and extra confirmation form.
 
-Reviewers share the engineer folder by default. A reviewer object
-`{ name: "code", worktree: true }` opts into a separate nested worktree on
-supporting hosts. Code review requires committed content and a pinned SHA.
-The host may start on the default branch: Grove selects the pinned commit only
-in the clean separate checkout (detached, hooks disabled), then checks actual
-HEAD and cleanliness before work and again before accepting the review.
-Preparation failures survive reviewer restart until a fresh assignment.
-Dirty content or unsupported placement is
-reported, never auto-committed or silently converted to sharing.
-
-Only a Chief-recorded explicit human `workspaceRepair: true` decision (`retry` or
-`note`) permits attachment-repair confirmation. Target/isolation derive from
-recorded routing, not free text. The affirmative form must immediately precede
-matching `set_workspace`, as the turn's final tool. Host confirmation/approval
-still applies. A placement failure does not authorize repair; ordinary questions
-and other attachment/move tools remain denied. Correct attachments and read-only
-diagnosis need no form.
-Restart invalidates both repair authority and consent: a fresh Chief-recorded
-human decision is required, including when the session identity is unchanged.
+Reviewers share the engineer folder by default. `{ name: "code", worktree: true }`
+requests a separate nested worktree on supporting hosts. The engineer tells the
+reviewer which branch/commit to inspect; the agents use native tools to prepare
+their checkout when needed. Grove does not select commits or require a clean
+snapshot merely to accept a review. Normal host approvals still apply.
 
 ### Steps: the engineer shapes the work
 
@@ -108,6 +92,10 @@ any of them:
      tests reviewer opens the evidence and checks it against each criterion.
 - `research`: one **research** step, reviewed by accuracy.
 
+These are default guidance, not unoverrideable rules. Explicit human direction
+already authorizes a different route, reviewer set or shipping behavior. The
+engineer records the reason in the report instead of asking for approval again.
+
 Some examples:
 - "What are the weekly and monthly active users of the agents window?" gets
   one research step with an accuracy reviewer.
@@ -127,8 +115,8 @@ Some examples:
    - **Review limits:** after 3 rounds without agreement the step is escalated
      to you, and no step gets more than 6 rounds however often you send it
      back.
-   - **No repeat reviews:** if the engineer resubmits the same output after the
-     reviewers asked for changes, it is escalated rather than reviewed again.
+   - Rebuttals and revisions go back to the team. Identical summary wording
+     is not treated as proof that the underlying work did not change.
 3. **Choosing again:** when the steps are done, Grove shows the engineer their
    results, and it chooses what's next:
    - add more steps, replace planned ones, or **redo** a finished step (and
@@ -151,6 +139,13 @@ Some examples:
    - **Approve** when you're satisfied. A code change then ships (see below).
    - **Ask for more**, and the same engineer plans the follow-up, usually
      redoing a step. This works on a finished task too: it reopens it.
+
+**Adapting and recovering:** `grove_plan_steps` with `replace: true` can replace
+unfinished work (include `note` for active work). `grove_submit` accepts
+`reviewers` and `note` to adapt a current review, including an empty reviewer
+list when the human says to skip it. `grove_deliver` accepts `ship: false` for
+local-only work and `complete: true` for an already-authorized outcome, without
+another sign-off. The engineer records the existing authorization in its decisions.
 
 If a review can't agree, the task is **escalated to you**. The Chief links the
 report and lays out each reviewer's position.
@@ -186,6 +181,10 @@ asked:
 If you don't want a PR, the Chief approves with `ship: false`. If the draft
 step said `NO PR`, approving simply finishes the task. If `gh` can't
 read the PR, the engineer's sprite shows the error until it can.
+
+This lifecycle is the default. The human can direct a different one through
+the Chief, including publishing or merging without another approval prompt.
+The engineer carries it out using native tools and reports what it did.
 
 ### Blocked, on hold, and questions
 
@@ -338,9 +337,11 @@ you ──► Chief of Staff ──► T1 engineer ── plan · execute · ver
   after that. The engineer only passes a short hire marker; Grove, inside the
   reviewer's chat, expands it into the brief: the reviewer's persona, the
   `grove-review` skill, the task, the output under review, the results of
-  earlier steps and the review discussion. When the reviewer's turn ends,
-  Grove checks its verdict, writes it to the board, and has the reviewer
-  **report to the engineer with `send_message`**. The report steers the
+  earlier steps and the review discussion. The reviewer calls
+  `grove_submit_review`, which records the verdict and returns the native
+  **`send_message` to the engineer**. A final-message observer also records
+  reviews from sessions that omit the submission tool, without a stop-hook loop.
+  The report steers the
   engineer's active turn (`delivery: "steer"`), or, if the engineer is idle
   (the host answers with action `rejected` and reason `cannotSteer`), is
   resent queued and starts its next turn; any other result is not resent.
@@ -353,7 +354,7 @@ you ──► Chief of Staff ──► T1 engineer ── plan · execute · ver
   `grove_record_decision` before returning success. It can notify the engineer.
   Decisions that change the engineer's work (changes, note, question, hold,
   cancel) steer its active turn; the rest queue. The engineer reads the already
-  applied decision and continues only if the resulting state permits work.
+  applied decision and follows the human's intent, adapting the workflow if needed.
 - **Relays are pointers.** Host messages can be clipped or arrive out of
   order, so a relay only carries its marker and tells the engineer to call
   `grove_next`, whose `decisions` and `reviews` fields hold the full text.
@@ -379,7 +380,8 @@ you ──► Chief of Staff ──► T1 engineer ── plan · execute · ver
 - **Concurrency rollout:** all Grove processes sharing a board must reload the
   updated plugin before relying on revision fencing. Older running code does
   not honor the new lock/revision contract. A tool already in flight cannot be
-  undone; cancellation prevents further work at the next tool boundary.
+  undone; use native session messaging/controls to stop work. Grove records
+  cancellation durably but does not deny host tools.
 - **Host limits.** A queued send the host rejects with `cannotSteer` is a
   host result, not a Grove one. An engineer whose chat has gone cold can only
   be reached again with a host change or a new hand-off. Grove captures the
@@ -396,68 +398,49 @@ you ──► Chief of Staff ──► T1 engineer ── plan · execute · ver
     hasn't arrived within 45 seconds, or the engineer stopped in the middle of
     a step.
 
-### How Grove enforces it
+### Tracking, not permission
 
-- **Roles:** each session runs its own copy of the extension, and Grove gives it
-  a role.
-  - **The Chief** can't hire agents or open `ask_user` forms, so it never
-    blocks. It can only use `grove_*` tools, the session tools, the canvas and
-    tool search: Grove refuses the shell, files, git and GitHub.
-  - **An engineer** has the full toolset, including subagents for side
-    lookups (they never count as reviews). It can't open `ask_user` forms
-    (the human talks to the Chief), and it can only start sessions for its
-    reviewers' tickets.
-  - **The stop hook** sends an engineer back to work, at most 3 times, when it
-    stops in the middle of a step without submitting, or while hires,
-    messages or a decision (next steps or delivery) are waiting. It never
-    does when the turn said and did nothing: the engineer is declining, for
-    example because the Chief told it to hold, and every reply-less turn shows
-    as an error in its chat. Grove's wake-ups try again later.
-  - **Reviewers** have the full toolset too, but can't start sessions or
-    message the Chief. Not modifying the project is in their instructions.
-  - **Other sessions** are unaffected.
-- **Tickets:** every reviewer session needs a ticket. Tickets carry a token,
-  so an engineer can only hire for its own task, and a reviewer can only
-  report on its own ticket.
-- **Output checks:** `grove_submit` checks the engineer's output before
-  recording it:
-  - a plan must be complete;
-  - research and execute outputs must say what was found or done (with valid
-    `evidence.json` if they left evidence);
-  - a verification must end with `RESULT: PASS` or `RESULT: FAIL` and leave a
-    valid `evidence.json` with real image or video files;
-  - Grove's PR steps must give the PR's link (`PR: <url>`), or `NO PR: <why>`
-    for the draft.
+Each session runs a copy of the extension with a Chief, engineer, reviewer or
+observer role. Roles scope writes to the shared board; they do not restrict
+native host tools. Delegation, communication and review behavior live in agent
+instructions. Neither tool hooks nor stop hooks deny work or force correction
+turns. Host approvals and permissions remain unchanged.
 
-  When a reviewer's turn ends (`agentStop` hook), Grove checks it ends with
-  `VERDICT: APPROVE` or `VERDICT: CHANGES` (or `BLOCKED: <what the human must
-  do>`) and sends it back for another turn if not.
-- **Skills:** Grove watches the `skill.invoked` events in the engineer's
-  session. Loading another kind of step's skill moves its sprite to that
-  workstation, and submitting a step without its skill gets a reminder (not a
-  refusal).
-- **Recovery:** sessions keep their transcripts, so failures resume work
-  instead of starting over.
-  - **Engineer stops mid-step:** the stop hook sends it back; if its session
-    goes idle anyway, Grove wakes it in the same chat, up to 3 times, then
-    tells the Chief the task stalled.
-  - **Reviewer turn ends without a verdict** (an error, for example): Grove
-    nudges it to continue in the same chat, up to 2 times. If you stop it
-    yourself, Grove leaves it alone until you message it.
-  - **Reviewer gives up:** the engineer retries in the **same chat** (attempt
-    2, 3), or in a new chat only if the host says the old one is gone. After 3
-    failed attempts the task is escalated. Hitting the host's message limit
-    isn't an attempt: the hire waits 15 minutes and goes to the same chat.
-  - **Lost reviewer session:** if a hire isn't picked up within 5 minutes, or a
-    working reviewer stops sending heartbeats for 4 minutes, it's retried.
-  - **Lost engineer:** `grove_handoff` issues a new hand-off. The new engineer
-    takes the task over and catches up from the board (`grove_next` shows the
-    finished steps' results); the old one steps aside.
+Reviewer tickets bind results to their assignments and submission versions, so
+late results from a replaced reviewer cannot approve a different revision.
+`grove_submit` validates non-empty output and structured evidence/results/PR
+links, not prose length. Review quality is judged by the team and the human.
+
+Grove watches phase skills and session activity. Active work stays at the
+phase's workstation, including while a command runs. Idle sessions rest in
+their tents; human prerequisites show at the lantern. Stale activity observations
+are not shown as indefinitely active work.
+
+Tracking failures are visible as delayed tracking, not permission failures.
+Polling reconciles the board when it becomes available, while independent work
+continues. Atomic writes, task locks and revision fencing still protect reports
+and decisions from stale writes.
+
+**Recovery belongs to the team:**
+- Engineers use native session/workspace tools to inspect and repair problems.
+- `grove_recover` with `reviewer` and `note` replaces an inaccessible reviewer
+  without discarding its prior findings or the forum's history. It can be used
+  whenever needed, not only after a host declares the chat gone.
+- `grove_recover` with `note` resumes a prerequisite the engineer has resolved.
+  It is not direction to ignore a human hold or silently waive objections.
+- Failed hires are retried up to three times; exhaustion returns recovery to the
+  engineer rather than automatically escalating an operational problem to you.
+  Host message limits still back off for 15 minutes.
+- If an engineer itself is inaccessible, ask the Chief to reach or replace it
+  using native messaging or `grove_handoff`. The replacement keeps the same task,
+  character, checkout, review history and reports.
+- Unresolved review disagreement at the round limits and things agents truly
+  cannot perform still come to the human.
 
 Process state is a **board** in the Chief's session data, at `files/grove/`:
 - `board.json` holds task numbering, hand-offs and notices sent.
-- `tasks/<T>.json` holds one task, including its reviewers' chat links. It's
-  written only by that task's owner (its engineer).
+- `tasks/<T>.json` holds one task, including its reviewers' chat links. Its
+  engineer records work; the Chief applies human decisions under the same lock.
 - `results/<ticket>.json` holds one reviewer's progress heartbeats and final
   review. Only the reviewer session working that ticket writes it.
 - `decisions/<T>.json` holds your decisions, from chat or the grove inbox.
@@ -762,7 +745,7 @@ Run these commands from `plugins/grove/`:
 ```sh
 node tests/process.test.mjs                              # process engine, roles, relays (simulated sessions)
 node tests/engine.test.mjs                               # engine alone: hold, blockers, questions, shipping, limits
-node tests/placement.test.mjs                            # routing, Git identity, reviewer revisions, consent (temporary fixtures)
+node tests/placement.test.mjs                            # native routing, truthful activity, non-blocking tracking recovery
 node tests/agents.test.mjs                               # plugin manifest, component paths, agent/skill front matter
 node tests/scene.test.mjs                                # team tents: pitch, rest inside, strike
 node tests/report.test.mjs                               # task report, report/evidence/inbox routes

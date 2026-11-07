@@ -12,18 +12,16 @@ import { fileURLToPath } from 'node:url';
 import { MAX_ROUNDS, memberTitle, stepLabel, stageLabel, KIND_LABELS, KIND_SKILLS, TEMPLATES, REVIEWER_FOCUS, ENGINEER_AGENT, prLine, currentStep } from './engine.mjs';
 import { memberModel } from './models.mjs';
 import { taskLabel, taskTag } from './names.mjs';
-import { reviewerPlacement, confirmationForm } from './placement.mjs';
+import { reviewerPlacement } from './placement.mjs';
 
 function placementBrief(task, ticket) {
-  if (!task.destination) return '\n## Workspace\nLegacy task: retain the current attachment; recovery needs an explicit structured destination.\n';
-  if (ticket) return `\n## Workspace and revision\n${ticket.worktree ? 'Separate worktree explicitly requested. Grove prepares a clean detached checkout of the pinned commit, when present; host default branch is not revision proof.' : 'Share the engineer attachment; do not create another worktree.'}
-Expected engineer directory: ${task.placement?.directory ?? 'unknown'}.
-${ticket.snapshot ? `Pinned submission v${ticket.version}: ${ticket.snapshot}. Actual reviewer HEAD must match before review and verdict acceptance.` : 'No isolated code snapshot is required for this ticket.'}
-Per-chat hook cwd is authoritative; session-level metadata is not proof. Unknown/mismatched placement blocks work. Do not modify code or repair attachment yourself.\n`;
+  if (!task.destination) return '\n## Workspace\nRetain the task checkout. Use native host tools to inspect or repair attachment when needed.\n';
+  if (ticket) return `\n## Workspace\n${ticket.worktree ? 'A separate worktree was requested from the host. Inspect the engineer branch/commit, not an unrelated default branch; use native tools to prepare it as needed.' : 'Share the engineer attachment.'}
+Engineer directory: ${task.directory ?? task.lastVerifiedPlacement?.directory ?? task.destination.workspace ?? 'host scratch'}.
+Submission version: ${ticket.version}. Inspect the actual work. Do not modify project source.\n`;
   return `\n## Workspace\nStructured destination: ${JSON.stringify(task.destination)}.
-Actual attachment: ${JSON.stringify(task.placement ?? { status: 'unknown' })}.
-Never infer destinations from prose, shell cd, or the Chief's scratch directory. New repository tasks use managed isolation; continuation uses the exact verified existing checkout. Independent creation with worktree:false may redirect an existing worktree to its primary root: verify actual placement, never silently work there.
-${task.workspaceRepair ? `The human authorized this owner's repair. Use ask_user with message "Confirm the authorized workspace repair." and requestedSchema.properties.workspaceConfirmation=${JSON.stringify(confirmationForm(task.workspaceRepair.target))}. Only an affirmative response permits set_workspace with ${JSON.stringify(task.workspaceRepair.target)} as the immediately next and final tool call. Host confirmation/approval still applies.` : 'Do not change attachment. If repair is needed, block and have the Chief record an explicit human workspaceRepair decision; a placement failure is not authorization.'}\n`;
+Last observed directory: ${task.directory ?? task.lastVerifiedPlacement?.directory ?? 'not observed yet'}.
+Use native host tools with the supplied workspace/worktree parameters. Continue existing work in its checkout. Resolve attachment and other operational problems yourself using normal host approvals; Grove adds no repair consent protocol. Escalate only what you cannot perform.\n`;
 }
 
 // Standing instructions live in the plugin's agent files and skills. Sessions aren't started as custom
@@ -105,7 +103,7 @@ function earlierResults(task, step) {
 }
 
 // Any reviewer can stop for something only the human can do.
-const BLOCKED_CLAUSE = '\n\nIf you can\'t review without something only the human can do (sign in, grant access, provide a file), stop: don\'t retry the same failing thing or work around it. Explain what failed, and make the last line `BLOCKED: <exactly what the human must do>`. Grove pauses the task, the Chief of Staff asks the human, and you continue here once it\'s done. Don\'t message the Chief of Staff yourself.';
+const BLOCKED_CLAUSE = '\n\nResolve operational problems autonomously first. If you truly need something only the human can do (sign in, grant access, run a manual machine action), explain what failed and end with `BLOCKED: <exactly what the human must do>`. Submit with grove_submit_review and send its returned message to the engineer. The Chief brings the precise prerequisite to the human.';
 
 export function briefFor(task, ticket) {
   const step = task.steps.find((s) => s.id === ticket.step);
@@ -145,7 +143,7 @@ ${inspect}
 ${forumTranscript(step)}
 ${feedbackBlock(task)}
 ## Output contract
-Your final message is your review: findings with severity, responses to other participants, and required changes (if any). The last line must be exactly one of:
+Call grove_submit_review with your review, then send its returned message to the engineer using native send_message. Your final message repeats the review: findings with severity, responses to other participants, and required changes (if any). The last line must be exactly one of:
 VERDICT: APPROVE
 VERDICT: CHANGES${BLOCKED_CLAUSE}`;
 }
@@ -244,7 +242,7 @@ Allowed files: .png .jpg .jpeg .gif .webp .svg .mp4 .webm (at least one image or
 ${step.ship ? '' : `Load the \`${skill}\` skill now, even if you loaded it earlier: it has the instructions for this kind of step.\n\n`}${step.brief || 'Do what this kind of step calls for, guided by the goal.'}
 ${placementBrief(task)}${redoOf ? `\nThis step re-runs ${redoOf.id}, whose result needs another pass. Use the feedback below.\n` : ''}${revising ? `
 ## Revising v${step.version}
-The reviewers asked for changes. Address every blocking point, and argue any you disagree with. Your output must change: resubmitting the same text escalates the step to the human.
+The reviewers asked for changes. Address every blocking point, and argue any you disagree with. Explain the actual changes or your rebuttal; identical summary wording is not evidence that the underlying work is unchanged.
 
 ### This round's discussion
 ${forumTranscript(lastRound)}
@@ -327,13 +325,8 @@ export const MEMBER_MARKER = /\[grove-hire:([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/(
 
 // Reminder Grove adds to a reviewer's later turns.
 export function memberContext(task, ticket) {
-  return `Grove: this chat is the ${memberTitle(ticket)} for ${taskLabel(task)} "${task.title}", working on ${ticket.id}. Finish with your review, ending in the verdict line from your brief; Grove checks your final message and sends it back if it doesn't end that way.`;
+  return `Grove: this chat is the ${memberTitle(ticket)} for ${taskLabel(task)} "${task.title}", working on ${ticket.id}. Call grove_submit_review with your review and verdict, then send its returned native message to the engineer. End your turn; no stop-hook correction loop is needed.`;
 }
-
-export function memberRevive(ticket, why) {
-  return `[Grove] Your work on ${ticket.id} ${why}. Pick up where you left off: your transcript above has everything so far. Finish with the output contract from your brief.`;
-}
-
 
 // Grove wakes the engineer itself (a decision made in the Grove inbox, or one missed while it was down). It lists
 // every decision the engineer hasn't read yet; grove_next has their full text.

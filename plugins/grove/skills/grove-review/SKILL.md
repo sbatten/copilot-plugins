@@ -32,4 +32,9 @@ This chat is yours for the whole task, so you remember what you said. In a later
 
 ## Finish
 
-Your final message is your review: findings with severity, responses to others, and the changes you require (if any). The last line must be exactly `VERDICT: APPROVE` or `VERDICT: CHANGES`.
+Call `grove_submit_review` with your full review: findings with severity,
+responses to others, and required changes. End it with `VERDICT: APPROVE` or
+`VERDICT: CHANGES` (or `BLOCKED: <human-only prerequisite>`).
+Send the tool's returned message to the engineer with native `send_message`,
+then end your turn. Grove does not force additional turns with stop-hook blocks.
+Outside Grove, leave the same review and verdict in your final message.

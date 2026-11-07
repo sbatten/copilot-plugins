@@ -2,6 +2,13 @@
 
 Status: **implemented** in 0.17.0. Decisions from review are recorded in [Decisions](#decisions); where the build differs from the proposal, see [Changes during implementation](#changes-during-implementation).
 
+**Historical design record.** The current behavior is documented in the
+[README](../../README.md). The single-engineer ownership, forest, reviews and
+report remain; the tool-denial layers, placement proofs/repair consent and
+stop-hook correction loops described below have been removed. Native host
+tools handle routing and recovery. Human direction can override default routes
+and shipping, and tracking does not grant permission to work.
+
 ## Summary
 
 Today every task gets a **task lead** that does no work itself and hires a

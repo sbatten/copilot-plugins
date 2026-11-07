@@ -88,7 +88,7 @@ try {
     await assert.rejects(engineer.proc.board.saveTask(old, old.owner, old.revision - 1), { code: 'stale_task' });
     await engineer.proc.engine.refresh();
     assert.equal(engineer.proc.leadTask().stage, 'cancelled');
-    assert.equal((await engineer.proc.hooks().onPreToolUse({ toolName: 'bash', toolArgs: {} })).permissionDecision, 'deny');
+    assert.equal(await engineer.proc.hooks().onPreToolUse({ toolName: 'bash', toolArgs: {} }), undefined, 'native host controls stopping; Grove does not deny tools');
     assert.equal((await engineer.proc.tools().find((t) => t.name === 'grove_submit').handler({ output: 'late result' })).resultType, 'failure');
     const repeated = await chief.call('grove_cancel_task', { taskId: 'T1' });
     assert.equal(repeated.duplicate, true);
@@ -118,7 +118,7 @@ try {
     assert.equal(out.stage, expected, action);
     if (action === 'hold') {
       assert.equal(chief.proc.engine.task('T1').pause.step, 'S1', JSON.stringify(chief.proc.engine.task('T1')));
-      assert.equal((await engineer.proc.hooks().onPreToolUse({ toolName: 'bash', toolArgs: {} })).permissionDecision, 'deny');
+      assert.equal(await engineer.proc.hooks().onPreToolUse({ toolName: 'bash', toolArgs: {} }), undefined);
       assert.equal((await chief.call('grove_record_decision', { taskId: 'T1', decision: 'resume' })).stage, 'working');
     }
     if (action === 'shelve') assert.equal((await chief.proc.inboxDecide('T1', 'unshelve')).stage, 'awaiting-approval');
@@ -269,8 +269,8 @@ try {
     });
     const out = await chief.call('grove_record_decision', { taskId: 'T1', decision: 'note', note: 'Authoritative feedback' });
     const args = { ...out.message, delivery: 'queue' };
-    assert.equal(await chief.proc.gateRelaySend(args), undefined);
     const relay = chief.proc.board.meta.decisionRelays.T1;
+    await chief.proc.relayStarted({ taskId: 'T1', seq: relay.seq, generation: relay.generation, attempt: relay.attempt, target: out.message.session });
     await chief.proc.relaySent({ taskId: 'T1', seq: relay.seq, generation: relay.generation, attempt: relay.attempt, target: out.message.session }, { success: false, error: { message: 'Unknown chat owner' } });
     const status = chief.proc.decisionView('T1');
     assert.equal(status.state, 'applied');
@@ -291,11 +291,11 @@ try {
     const out = await chief.call('grove_record_decision', { taskId: 'T1', decision: 'note', note: 'Keep this feedback' });
     const args = { ...out.message, delivery: 'queue' };
     for (let i = 0; i < 3; i++) {
-      assert.equal(await chief.proc.gateRelaySend(args), undefined);
       const relay = chief.proc.board.meta.decisionRelays.T1;
+      await chief.proc.relayStarted({ taskId: 'T1', seq: relay.seq, generation: relay.generation, attempt: relay.attempt, target: out.message.session });
       await chief.proc.relaySent({ taskId: 'T1', seq: relay.seq, generation: relay.generation, attempt: relay.attempt, target: out.message.session }, { success: false, error: { message: 'temporary network error' } });
     }
-    assert.equal((await chief.proc.gateRelaySend(args)).permissionDecision, 'deny');
+    assert.equal(await chief.proc.hooks().onPreToolUse({ toolName: 'send_message', toolArgs: args }), undefined, 'notification limits never deny native host tools');
     const board = await Board.open(chief.proc.board.root);
     await chief.proc.bind(board, 'chief');
     await chief.proc.reconcileRelays();

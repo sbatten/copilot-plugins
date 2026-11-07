@@ -27,7 +27,7 @@
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { taskName, taskLabel } from './names.mjs';
-import { destination, committedSnapshot, reviewerMatches, observePlacement } from './placement.mjs';
+import { destination } from './placement.mjs';
 
 export const MAX_ROUNDS = 3;
 // Review rounds on one step before it always goes to the human, however often they send it back.
@@ -35,7 +35,6 @@ export const MAX_STEP_ROUNDS = 6;
 // A hire that hit the host's message limit waits this long before it is offered again.
 export const RATE_LIMIT_BACKOFF_MS = 15 * 60 * 1000;
 export const MAX_ATTEMPTS = 3;
-export const MAX_BLOCKS = 2;
 export const MAX_STEPS = 24;
 // How many decision outcomes a task keeps, so the Chief and the inbox can say what became of each one.
 export const DECISION_RESULTS = 30;
@@ -620,11 +619,6 @@ export class ProcessEngine {
       }
       try {
         this.humanDecision({ taskId: task.id, action: d.action, note: d.note ?? '', ship: typeof d.ship === 'boolean' ? d.ship : undefined });
-        if (d.workspaceRepair && d.seq > (task.repairInvalidatedThrough ?? 0)
-          && d.workspaceRepair.sessionId === task.owner && ['retry', 'note'].includes(d.action)) {
-          task.workspaceRepair = { ...d.workspaceRepair, seq: d.seq };
-          this.changed(task, 'The human authorized workspace repair; immediate host confirmation is still required.');
-        }
         this.noteDecision(task, d, 'applied');
         applied.push(d);
       } catch (err) {
@@ -662,7 +656,6 @@ export class ProcessEngine {
   planSteps(taskId, { template, steps, replace = false, redoFrom, note = '' }) {
     const t = this.task(taskId);
     if (TERMINAL.has(t.stage)) throw new ProcessError('invalid_state', `${taskId} is ${t.stage}.`);
-    if (t.stage === 'awaiting-approval' || t.stage === 'escalated') throw new ProcessError('invalid_state', `${taskId} is waiting on the human; their decision comes first.`);
     const fresh = normalizeSteps({ template, steps });
     let redo = [];
     if (redoFrom !== undefined) {
@@ -675,12 +668,18 @@ export class ProcessEngine {
     }
     if (!fresh.length && !redo.length && !replace) throw new ProcessError('invalid_input', 'Give a template, steps, or redoFrom.');
     const msg = clip(note, 4000);
-    if (msg) t.feedback.push({ from: 'engineer', at: now(), text: msg });
-    const dropped = replace ? t.steps.filter((s) => s.status === 'pending') : [];
-    if (replace) for (const s of dropped) s.status = 'skipped';
-    const pending = t.steps.filter((s) => s.status === 'pending');
+    const dropped = replace ? t.steps.filter((s) => s.status === 'pending' || (msg && !['done', 'skipped'].includes(s.status))) : [];
     const added = [...redo, ...fresh];
-    if (t.steps.filter((s) => s.status !== 'skipped').length + added.length > MAX_STEPS) throw new ProcessError('invalid_input', `A task can have at most ${MAX_STEPS} steps.`);
+    if (t.steps.filter((s) => s.status !== 'skipped' && !dropped.includes(s)).length + added.length > MAX_STEPS) throw new ProcessError('invalid_input', `A task can have at most ${MAX_STEPS} steps.`);
+    if (msg) t.feedback.push({ from: 'engineer', at: now(), text: msg });
+    if (replace) for (const s of dropped) s.status = 'skipped';
+    if (replace && (dropped.some((s) => s.startedAt) || (msg && t.stage !== 'working'))) {
+      cancelOpenTickets(t);
+      t.pause = null;
+      t.escalation = null;
+      t.stage = 'routing';
+    }
+    const pending = t.steps.filter((s) => s.status === 'pending');
     // Redone steps run before the steps still waiting; new steps run after them.
     const made = added.map((s) => newStep(t, s));
     const redoMade = made.slice(0, redo.length);
@@ -756,27 +755,38 @@ export class ProcessEngine {
   }
 
   // The engineer hands the result to the human (through the Chief). Steps not started are skipped.
-  deliver(taskId, summary, { decisions = [], ship, ask = '' } = {}) {
+  deliver(taskId, summary, { decisions = [], ship, ask = '', complete = false } = {}) {
     const t = this.task(taskId);
-    this.requirePlacement(t);
-    if (t.stage !== 'routing') throw new ProcessError('invalid_state', `${taskId} is "${stageLabel(t)}"; deliver once the current step is done.`);
+    if (TERMINAL.has(t.stage)) throw new ProcessError('invalid_state', `${taskId} is ${t.stage}.`);
+    if (t.stage !== 'routing' && !complete) throw new ProcessError('invalid_state', `${taskId} is "${stageLabel(t)}"; finish the current step, or use complete with the human's already-authorized outcome.`);
     // Shipping: the human already approved. Delivering hands back to watching the PR.
-    if (t.ship?.pr && SHIP_ACTIVE.has(t.ship.phase)) {
+    if (!complete && ship !== false && t.ship?.pr && SHIP_ACTIVE.has(t.ship.phase)) {
       const text = clip(summary, 1000);
       if (text) this.postUpdate(taskId, text);
       for (const s of t.steps) if (s.status === 'pending') s.status = 'skipped';
       this.advance(t);
       return t;
     }
-    if (!t.steps.some((s) => s.status === 'done')) throw new ProcessError('invalid_state', `${taskId} has no finished steps to deliver yet. Plan steps first.`);
+    if (!complete && !t.steps.some((s) => s.status === 'done')) throw new ProcessError('invalid_state', `${taskId} has no finished steps to deliver yet. Plan steps first.`);
     const text = clip(summary, 4000);
-    if (text.length < 20) throw new ProcessError('invalid_input', 'Write a short summary for the human: what was found or done, and anything they should know.');
-    for (const s of t.steps) if (s.status === 'pending') s.status = 'skipped';
-    t.deliveries += 1;
+    if (!text) throw new ProcessError('invalid_input', 'Write a summary of the outcome for the human.');
     const keyDecisions = (Array.isArray(decisions) ? decisions : []).map((d) => clip(d, 400)).filter(Boolean).slice(0, 12);
+    for (const s of t.steps) if (!['done', 'skipped'].includes(s.status)) {
+      if (complete && s.output && s.reviewers.length) s.reviewOverride = keyDecisions.join('; ') || 'The human already authorized this outcome.';
+      s.status = complete && s.output ? 'done' : 'skipped';
+    }
+    cancelOpenTickets(t);
+    t.deliveries += 1;
     // An approved code change goes on to a pull request unless the engineer says it isn't one.
     const shipIt = typeof ship === 'boolean' ? ship : t.steps.some((s) => s.kind === 'execute' && s.status === 'done');
-    t.delivery = { summary: text, decisions: keyDecisions, ask: clip(ask, 600), ship: shipIt, at: now(), n: t.deliveries };
+    t.delivery = { summary: text, decisions: keyDecisions, ask: clip(ask, 600), ship: shipIt, complete, at: now(), n: t.deliveries };
+    if (complete) {
+      t.stage = 'done';
+      t.pause = null;
+      t.escalation = null;
+      this.changed(t, 'Delivered the outcome already authorized by the human; task done.');
+      return t;
+    }
     // A code change goes to the human with a draft PR, so they can review the change itself.
     if (shipIt && !t.ship?.pr) {
       t.ship = { phase: 'draft', startedAt: now(), pr: null, attention: null, noPr: null };
@@ -794,20 +804,26 @@ export class ProcessEngine {
 
   // The engineer submits a step's output (grove_submit). It's checked against the step's contract before
   // anything is recorded, so a bad submission comes straight back as an error saying what to fix.
-  async submit(taskId, stepId, raw) {
+  async submit(taskId, stepId, raw, { reviewers, note = '' } = {}) {
     const task = this.task(taskId);
-    this.requirePlacement(task);
     const step = currentStep(task);
-    if (!step || task.stage !== 'working') {
+    if (!step || (task.stage !== 'working' && !note.trim())) {
       throw new ProcessError('invalid_state', `${taskId} is "${stageLabel(task)}"; there's no step to submit right now. Call grove_next.`);
     }
     if (stepId && stepId !== step.id) throw new ProcessError('invalid_input', `The step in progress is ${step.id}, not ${stepId}.`);
     const text = String(raw ?? '').trim();
     const checked = await this.checkStep(task, step, text);
     if (!checked.ok) throw new ProcessError('invalid_output', checked.reason);
-    if (task.destination && step.reviewers.some((r) => r.worktree)) {
-      if (!task.placement.repository) throw new ProcessError('invalid_state', 'Separate reviewers require a repository attachment.');
-      step.snapshot = ['execute', 'verify'].includes(step.kind) ? await committedSnapshot(task.placement.directory) : null;
+    if (reviewers !== undefined) {
+      if (!note.trim()) throw new ProcessError('invalid_input', 'Explain the human direction or review adjustment in note.');
+      step.reviewers = normalizeSteps({ steps: [{ kind: step.kind, reviewers }] })[0].reviewers;
+    }
+    if (note.trim()) {
+      for (const k of task.tickets) if (k.step === step.id && !['done', 'failed', 'cancelled'].includes(k.status)) k.status = 'cancelled';
+      task.pause = null;
+      task.escalation = null;
+      task.feedback.push({ from: 'engineer', at: now(), text: clip(note, 4000) });
+      this.changed(task, `Adjusted ${step.id}: ${clip(note, 300)}`);
     }
     this.recordStepOutput(task, step, text, checked);
     return { task, step };
@@ -825,14 +841,14 @@ export class ProcessEngine {
     const dir = this.stepEvidenceDir(task, step);
     switch (step.kind) {
       case 'plan':
-        return text.length < 200 ? { ok: false, reason: 'Submit the complete plan: overview, steps, what changes (files, components, systems), risks, acceptance criteria, and how it will be verified.' } : { ok: true };
+        return text ? { ok: true } : { ok: false, reason: 'Submit the plan.' };
       case 'verify': {
         if (!parseResult(text)) return { ok: false, reason: 'End the verification report with a line exactly "RESULT: PASS" or "RESULT: FAIL".' };
         const ev = await this.validateEvidence(dir);
         return ev.ok ? { ok: true, ev } : { ok: false, reason: `Visual evidence is required: ${ev.reason} Save the files and evidence.json in ${dir}.` };
       }
       default: {
-        const base = text.length >= 80 ? { ok: true }
+        const base = text ? { ok: true }
           : step.kind === 'research'
             ? { ok: false, reason: 'Submit your findings: the answer, how you got it (queries, sources, file paths), and what is uncertain.' }
             : { ok: false, reason: 'Submit a summary of what you did: files or things changed, the effect, how to inspect it, build and test results, and anything left undone.' };
@@ -854,7 +870,7 @@ export class ProcessEngine {
     const ticket = {
       id: `${task.id}-rev-${specialty}-${n}`,
       role: 'reviewer', specialty, step, round,
-      worktree, snapshot: worktree ? submission?.snapshot ?? null : null, version: submission?.version ?? 0,
+      worktree, version: submission?.version ?? 0,
       forum: step,
       agentType: AGENT_TYPES.reviewer(specialty),
       status: 'issued',
@@ -890,7 +906,6 @@ export class ProcessEngine {
     const found = this.findTicket(marker);
     if (!found) throw new ProcessError('unknown_ticket', `Ticket ${marker} does not exist. Call grove_next for valid hires.`);
     const { task, ticket } = found;
-    this.requirePlacement(task);
     if (!this.owns(task)) throw new ProcessError('not_owner', `Ticket ${marker} belongs to another task's engineer.`);
     if (TERMINAL.has(task.stage)) throw new ProcessError('invalid_state', `${task.id} is ${task.stage}; this hire is no longer needed.`);
     if (ticket.status !== 'issued') throw new ProcessError('ticket_used', `Ticket ${marker} is ${ticket.status}. Call grove_next for current hires.`);
@@ -970,7 +985,7 @@ export class ProcessEngine {
     if (m && result.sessionId) m.sessionId = result.sessionId;
     if (m) { m.status = 'alive'; m.seenAt = now(); }
     if (result.status === 'running') {
-      ticket.placement = result.placement;
+      ticket.busy = result.busy;
       if (ticket.status === 'running' && ticket.heartbeatAt === result.heartbeat) return false;
       const first = ticket.status !== 'running';
       ticket.status = 'running';
@@ -992,7 +1007,7 @@ export class ProcessEngine {
       return true;
     }
     if (result.status === 'done') {
-      if (task.destination && (result.submissionVersion !== ticket.version
+      if (result.submissionVersion !== undefined && (result.submissionVersion !== ticket.version
         || task.steps.find((s) => s.id === ticket.step)?.version !== ticket.version)) {
         this.failTicket(task, ticket, 'Reviewer submission version is mismatched; report rejected.');
         return true;
@@ -1006,13 +1021,6 @@ export class ProcessEngine {
         this.blockOn(task, ticket, checked.blocked, String(result.text ?? ''));
         return true;
       }
-      const placement = task.destination && ticket.worktree && result.placement?.status === 'verified'
-        ? await observePlacement(task, result.placement.directory, { reviewer: ticket, sessionId: result.sessionId })
-        : result.placement;
-      if (!reviewerMatches(task, ticket, placement)) {
-        this.failTicket(task, ticket, 'Reviewer attachment/revision is unknown or mismatched; report rejected.');
-        return true;
-      }
       this.acceptReview(task, ticket, String(result.text ?? '').trim());
       return true;
     }
@@ -1023,12 +1031,6 @@ export class ProcessEngine {
     this.completeTicket(ticket);
     const step = task.steps.find((s) => s.id === ticket.step);
     if (step) this.recordReview(task, step, ticket, text, parseVerdict(text));
-  }
-
-  requirePlacement(task) {
-    if (task.destination && task.placement?.status !== 'verified') {
-      throw new ProcessError('invalid_state', task.placement?.error ?? 'Actual attachment is unknown; inspect placement before working.');
-    }
   }
 
   // Fail hires whose session never picked them up or stopped reporting. Owner only; called on each poll.
@@ -1068,7 +1070,7 @@ export class ProcessEngine {
     }
     // Hitting the host's message limit isn't the reviewer failing: wait, then try the same chat again.
     if (!retryAt && ticket.attempt >= MAX_ATTEMPTS) {
-      this.escalate(task, ticket.step, `${this.describe(task, ticket)} failed ${MAX_ATTEMPTS} times (last: ${why}).`);
+      this.changed(task, `${this.describe(task, ticket)} could not be reached: ${why}. The engineer can replace it with grove_recover.`);
       return;
     }
     const code = ticket.id.split('-').slice(1, -1).join('-');
@@ -1084,6 +1086,24 @@ export class ProcessEngine {
     this.changed(task, `${this.describe(task, ticket)} failed (${why}); retrying ${where}${when} as ${retry.id}.`);
   }
 
+  recoverReviewer(taskId, specialty, note) {
+    const task = this.task(taskId);
+    const step = currentStep(task);
+    if (!step || !step.reviewers.some((r) => r.name === specialty) || !step.output) {
+      throw new ProcessError('invalid_input', 'Choose a reviewer on the current submitted step.');
+    }
+    for (const k of task.tickets) if (k.step === step.id && k.specialty === specialty && !['done', 'failed', 'cancelled'].includes(k.status)) k.status = 'cancelled';
+    const member = task.members[`reviewer-${specialty}`];
+    if (member) member.status = 'lost';
+    task.pause = null;
+    task.escalation = null;
+    task.stage = 'reviewing';
+    step.status = 'reviewing';
+    this.issue(task, { specialty, step: step.id, round: step.forum.round });
+    this.changed(task, `Engineer replaced inaccessible ${specialty} reviewer: ${clip(note, 400)}`);
+    return task;
+  }
+
   // ---------- step transitions ----------
 
   post(step, entry) {
@@ -1093,12 +1113,6 @@ export class ProcessEngine {
 
   // A step's work is in: verification records its evidence; otherwise the review opens, or the step is done.
   recordStepOutput(task, step, text, checked) {
-    // A revision identical to the version the reviewers just rejected would only repeat the review.
-    const same = (a) => String(a ?? '').replace(/\s+/g, ' ').trim();
-    if (step.forum.round > 0 && step.version > 0 && step.reviewers.length && same(text) === same(step.output)) {
-      this.escalate(task, step.id, `The engineer submitted the same ${KIND_LABELS[step.kind].toLowerCase()} after the reviewers asked for changes, so another review round would repeat itself.`);
-      return;
-    }
     if (task.ship && step.kind === 'execute') {
       const pr = parsePr(text);
       if (pr && (!task.ship.pr || task.ship.pr.url !== pr.url)) {
@@ -1208,21 +1222,20 @@ export class ProcessEngine {
     if (!DECISIONS.includes(action)) return `decision must be one of ${DECISIONS.join(', ')}.`;
     if (action === 'shelve') return SHELVABLE.has(st) ? null : `${task.id} is "${label}"; only a task waiting on the human can be shelved.`;
     if (action === 'unshelve') return `${task.id} isn't on the shelf.`;
-    if (st === 'cancelled') return `${task.id} is cancelled.`;
+    if (st === 'cancelled' && action !== 'changes') return `${task.id} is cancelled. Record "changes" with explicit human direction to reopen it.`;
     if (st === 'done' && action !== 'changes') return `${task.id} is done. To reopen it, record "changes" with what the human wants.`;
     if (ship !== undefined && action !== 'approve') return 'ship only applies to "approve".';
     switch (action) {
       case 'cancel': return null;
-      case 'approve': return ['awaiting-approval', 'escalated', 'ready-to-merge'].includes(st) ? null : `${task.id} is "${label}"; there is nothing to approve. Use "note" to pass on what they said.`;
+      case 'approve': return null;
       case 'changes':
         if (!msg) return 'Pass the human\'s words as note: what they want changed or added.';
-        return ['awaiting-approval', 'escalated', 'watching', 'ready-to-merge', 'done'].includes(st) ? null : `${task.id} is "${label}"; the engineer is working. Use "note" to pass on what they want.`;
+        return null;
       case 'note': case 'question':
         if (!msg) return `Pass the human's words as note.`;
         return null;
       case 'hold': return HOLDABLE.has(st) || st === 'blocked' ? null : `${task.id} is "${label}"; only a task in progress can be put on hold.`;
-      case 'resume': return PAUSED_STAGES.has(st) ? null : `${task.id} is "${label}"; it isn't on hold or blocked.`;
-      case 'retry': return st === 'blocked' ? null : `${task.id} is "${label}"; it isn't blocked.`;
+      case 'resume': case 'retry': return null;
       case 'merge': return ['ready-to-merge', 'watching'].includes(st) && task.ship?.pr ? null : `${task.id} has no open pull request to merge (it is "${label}").`;
       default: return null;
     }
@@ -1264,7 +1277,8 @@ export class ProcessEngine {
     }
     if (action === 'resume' || action === 'retry') {
       if (msg) task.feedback.push({ from: 'human', at: now(), text: msg });
-      this.unpause(task, action === 'retry' ? `You unblocked the task${msg ? `: ${clip(msg, 200)}` : ''}.` : `You resumed the task${msg ? `: ${clip(msg, 200)}` : ''}.`);
+      if (task.pause) this.unpause(task, action === 'retry' ? `You unblocked the task${msg ? `: ${clip(msg, 200)}` : ''}.` : `You resumed the task${msg ? `: ${clip(msg, 200)}` : ''}.`);
+      else this.changed(task, `You asked the engineer to continue${msg ? `: ${clip(msg, 200)}` : ''}.`);
       return task;
     }
     if (action === 'merge' || (action === 'approve' && task.stage === 'ready-to-merge')) {
@@ -1276,8 +1290,8 @@ export class ProcessEngine {
       this.advance(task);
       return task;
     }
-    if (action === 'changes' && (task.stage === 'done' || SHIPPING_STAGES.has(task.stage))) {
-      const reopened = task.stage === 'done';
+    if (action === 'changes' && (TERMINAL.has(task.stage) || SHIPPING_STAGES.has(task.stage))) {
+      const reopened = TERMINAL.has(task.stage);
       task.feedback.push({ from: 'human', at: now(), text: msg });
       if (reopened) {
         task.delivery = null;
@@ -1289,12 +1303,23 @@ export class ProcessEngine {
       this.changed(task, `${reopened ? 'You reopened the task' : 'You asked for changes to the PR'}: ${clip(msg, 200)}`);
       return task;
     }
+    if (action === 'approve' && !['awaiting-approval', 'escalated'].includes(task.stage)) {
+      if (msg) task.feedback.push({ from: 'human', at: now(), text: msg });
+      if (task.pause) this.unpause(task, `You authorized continuation${msg ? `: ${clip(msg, 200)}` : ''}.`);
+      else this.changed(task, `You authorized the engineer to proceed${msg ? `: ${clip(msg, 200)}` : ''}.`);
+      return task;
+    }
     // A note passes the human's words to the engineer without changing the stage.
     if (action === 'note') {
       if (TERMINAL.has(task.stage)) throw new ProcessError('invalid_state', `${task.id} is already ${task.stage}.`);
       if (!msg) throw new ProcessError('invalid_input', 'A note needs the human\'s words.');
       task.feedback.push({ from: 'human', at: now(), text: msg });
       this.changed(task, `You added a note: ${clip(msg, 200)}`);
+      return task;
+    }
+    if (action === 'changes' && !['awaiting-approval', 'escalated'].includes(task.stage)) {
+      task.feedback.push({ from: 'human', at: now(), text: msg });
+      this.changed(task, `You directed a change: ${clip(msg, 200)}. The engineer adapts the workflow.`);
       return task;
     }
     if (task.stage === 'awaiting-approval') {

@@ -62,6 +62,15 @@ const task = {
 assert.equal(evidenceRel(task, task.steps[1].verification, 'after.png'), 'evidence/attempt-2/after.png');
 assert.equal(evidenceRel(task, { dir: '/elsewhere/x' }, 'a.png'), null);
 const html = renderReport(task, { root, boardId: 'b1', color: 'teal1', now: at });
+{
+  const overridden = structuredClone(task);
+  overridden.stage = 'done';
+  overridden.steps[0].reviewOverride = 'The human requested delivery without the remaining review.';
+  const report = renderReport(overridden, { root, now: at });
+  assert.match(report, /Review not completed; delivered under human direction/);
+  assert.doesNotMatch(report, /S1 <span class="ok">✓<\/span>/, 'completion is not unanimous review approval');
+  assert.match(report, /XSS\?/, 'original findings remain in the report');
+}
 // The task's name sits in the line above its title, so the title keeps its room.
 {
   const named = renderReport({ ...task, name: 'Moonfern' }, { root, boardId: 'b1', color: 'teal1', now: at });

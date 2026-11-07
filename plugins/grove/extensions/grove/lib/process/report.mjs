@@ -203,6 +203,7 @@ function verdicts(step) {
 }
 
 function reviewOutcome(step) {
+  if (step.reviewOverride) return `Review not completed; delivered under human direction: ${step.reviewOverride}`;
   if (!step.reviewers.length) return 'Not reviewed';
   const rounds = Math.max(0, step.forum.round - step.forum.windowStart);
   const human = step.forum.posts.findLast((p) => p.kind === 'human');
@@ -344,7 +345,7 @@ export function renderReport(task, { root, boardId = '', color: colorName = 'amb
   if (task.criteria.length) facts.push(`<li>Criteria shown: <span class="${proven.every((p) => p.length) ? 'ok' : 'no'}">${proven.filter((p) => p.length).length} of ${task.criteria.length}</span></li>`);
   if (verification) facts.push(`<li>Verification: <span class="${verification.result === 'pass' ? 'ok' : 'no'}">${verification.result === 'pass' ? 'passed' : 'failed'}</span></li>`);
   const reviewed = steps.filter((s) => s.reviewers.length && s.version);
-  if (reviewed.length) facts.push(`<li>Reviews: ${reviewed.map((s) => `${escapeHtml(s.id)} ${s.status === 'done' ? '<span class="ok">✓</span>' : '<span class="no">…</span>'}`).join(' · ')}</li>`);
+  if (reviewed.length) facts.push(`<li>Reviews: ${reviewed.map((s) => `${escapeHtml(s.id)} ${s.status === 'done' && !s.reviewOverride ? '<span class="ok">✓</span>' : '<span class="no">…</span>'}`).join(' · ')}</li>`);
   const positions = move.positions?.length
     ? `<ul class="positions">${move.positions.map((p) => `<li><b>${escapeHtml(p.post.author)}</b> <span class="v-${p.verdict}">${p.verdict === 'approve' ? 'approves' : 'wants changes'}</span>: ${escapeHtml(firstSentence(p.post.text))}</li>`).join('')}</ul>`
     : '';

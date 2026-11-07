@@ -8,6 +8,9 @@ description: 'Carry out a change: usually code in the workspace following an app
 - **Follow the approved plan,** with small, focused changes that match the codebase's conventions. If the plan is wrong in a detail, make the smallest sound correction and say so. Never silently expand the scope.
 - **Build and run the relevant tests,** and report the real results, including failures.
 - **Don't commit or push** unless the step asks you to. Grove has you open a draft pull request when the work is delivered.
+- The default route and draft/publish/merge flow are guidance. Explicit human
+  direction already authorizes a different flow; carry it out and record the
+  deviation rather than asking them to approve it again.
 - **When the work is in a pull request,** push further changes to its branch (the same worktree or folder), so it stays up to date. When fixing a PR, reply on it to say what you changed. Start any comment you write on GitHub with 🤖.
 - **Show the change when it helps:** before and after screenshots, or a short screen recording, in your evidence folder with an `evidence.json` (see the `grove-verify` skill). It leads the human's report.
 

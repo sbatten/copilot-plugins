@@ -79,19 +79,16 @@ async function hire(eng, h) {
   return { member, brief: up?.modifiedPrompt ?? '' };
 }
 
-// The reviewer finishes its review. Grove's stop hook tells it how to report; we return that instruction
+// The reviewer submits its review. The tool returns the native message; we return that instruction
 // (session, message, delivery) without sending it, so each test chooses when and how the host delivers it.
 async function review(m, text) {
   m.member.emit({ type: 'assistant.turn_start' });
   m.member.emit({ type: 'assistant.message', data: { content: text } });
-  const stop = await m.member.hooks.onAgentStop({ sessionId: m.member.id });
-  assert.equal(stop?.decision, 'block');
-  assert.match(stop.reason, /your work is recorded/);
-  const session = /session "([^"]+)"/.exec(stop.reason)[1];
-  const delivery = /delivery "([^"]+)"/.exec(stop.reason)[1];
-  const message = /message exactly:\n([\s\S]*?)\nThen end your turn/.exec(stop.reason)[1];
-  assert.ok(stop.reason.includes(DELIVERY_FALLBACK), 'the reviewer is told how to fall back when the engineer is idle');
-  return { session, message, delivery, reason: stop.reason };
+  const submitted = await m.member.call('grove_submit_review', { output: text });
+  assert.equal(submitted.ok, true, submitted.data);
+  assert.ok(submitted.data.guidance.includes(DELIVERY_FALLBACK));
+  assert.equal(await m.member.hooks.onAgentStop({ sessionId: m.member.id }), undefined, 'no stop-hook loop');
+  return { ...submitted.data.messages[0], reason: submitted.data.guidance };
 }
 // The reviewer sends its report through the host (with the cannotSteer fallback) and stops.
 async function report(host, m, r) {
@@ -449,7 +446,7 @@ const hooked = (eng) => async (m) => (await eng.hooks.onUserPromptSubmitted({ pr
     assert.equal(rev.complete, true, 'a short forum copy is the whole review; only clipped copies are incomplete');
     assert.match(rev.text, /Missing tests/);
     assert.deepEqual(next.data.reviewsIncomplete, [{ ticket: t, error }]);
-    assert.match(next.data.guidance, new RegExp(`^Grove couldn't read a review \\(${t}\\) in full from the board just now[\\s\\S]*grove_blocked`));
+    assert.match(next.data.guidance, /tracking is incomplete.*Continue independent work/s);
   }
   eng.proc.board.readResult = real;
   const next = await eng.call('grove_next');

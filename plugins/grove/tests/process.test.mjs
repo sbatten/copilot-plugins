@@ -103,8 +103,7 @@ async function dispatch(from, h, { fail = false } = {}) {
   return { member, link, brief: up?.modifiedPrompt ?? '', context: up?.additionalContext ?? '' };
 }
 
-// The reviewer works its turn(s): each reply is checked when the turn ends; a block sends it back. Once its
-// review is recorded, Grove has it report to the engineer with send_message, which starts the engineer's turn.
+// The reviewer submits before ending its turn, then reports with the native host tool.
 async function work(m, respond) {
   let blocks = 0;
   let last;
@@ -112,17 +111,16 @@ async function work(m, respond) {
   for (let turn = 0; turn < 6; turn++) {
     m.member.emit({ type: 'assistant.turn_start' });
     m.member.emit({ type: 'assistant.message', data: { content: await respond(m.brief, turn) } });
-    const stop = await m.member.hooks.onAgentStop({ sessionId: m.member.id });
-    if (stop?.decision === 'block' && /your work is recorded/.test(stop.reason)) {
-      const session = /session "([^"]+)"/.exec(stop.reason)[1];
-      const message = /message exactly:\n([\s\S]*?)\nThen end your turn/.exec(stop.reason)[1];
-      report = await send(m.member, session, message);
+    const submitted = await m.member.call('grove_submit_review', { output: m.member.proc.lastText });
+    if (submitted.ok) {
+      const message = submitted.data.messages[0];
+      report = message ? await send(m.member, message.session, message.message) : null;
       m.member.emit({ type: 'assistant.message', data: { content: 'Reported.' } });
       assert.equal(await m.member.hooks.onAgentStop({ sessionId: m.member.id }), undefined, 'reported; the member may stop');
       break;
     }
-    if (stop?.decision === 'block') { blocks++; last = stop.reason; continue; }
-    break;
+    blocks++;
+    last = submitted.data;
   }
   m.member.emit({ type: 'session.idle', data: {} });
   return { blocks, last, report };
@@ -199,16 +197,16 @@ assert.equal(res.data.handoff.relationship, 'independent');
 assert.equal(res.data.handoff.workspace, undefined);
 assert.equal(res.data.handoff.worktree, undefined);
 assert.equal(res.data.handoff.model, 'claude-opus-5.5', 'a code change runs on Opus');
-assert.match(res.data.guidance, /Start the engineer now: call create_session/);
+assert.match(res.data.guidance, /Start the engineer with create_session/);
 let placed = await chief.hooks.onPreToolUse({ toolName: 'create_session', toolArgs: { title: 'T1', prompt: handoff1, relationship: 'currentSession', model: 'claude-haiku-5.5' } });
 assert.deepEqual(placed.modifiedArgs, { title: 'T1', prompt: handoff1, relationship: 'independent', model: 'claude-opus-5.5' }, 'Scratch engineer has its own independent session, never the Chief directory');
 placed = await chief.hooks.onPreToolUse({ toolName: 'create_session', toolArgs: { title: 'x', prompt: handoff1, workspace: '/other/repo', worktree: true } });
 assert.deepEqual(placed.modifiedArgs, { title: 'x', prompt: handoff1, relationship: 'independent', model: 'claude-opus-5.5' }, 'structured scratch routing strips accidental caller placement');
 assert.equal(await chief.hooks.onPreToolUse({ toolName: 'create_session', toolArgs: { title: 'x', prompt: 'unrelated' } }), undefined, 'other sessions are untouched');
-assert.equal((await chief.hooks.onPreToolUse({ toolName: 'task', toolArgs: { agent_type: 'explore', prompt: 'x' } })).permissionDecision, 'deny', 'the Chief never hires');
-assert.equal((await chief.hooks.onPreToolUse({ toolName: 'ask_user', toolArgs: {} })).permissionDecision, 'deny', 'the Chief stays available');
+assert.equal(await chief.hooks.onPreToolUse({ toolName: 'task', toolArgs: { agent_type: 'explore', prompt: 'x' } }), undefined, 'delegation is instruction-based');
+assert.equal(await chief.hooks.onPreToolUse({ toolName: 'ask_user', toolArgs: {} }), undefined, 'native host permissions apply');
 for (const tool of ['bash', 'view', 'edit', 'skill', 'github-mcp-server-merge_pull_request']) {
-  assert.match((await chief.hooks.onPreToolUse({ toolName: tool, toolArgs: {} })).permissionDecisionReason, /coordinates and never does the work itself/, `the Chief can't use ${tool}`);
+  assert.equal(await chief.hooks.onPreToolUse({ toolName: tool, toolArgs: {} }), undefined, 'Grove does not add a tool-denial layer');
 }
 for (const tool of ['grove_status', 'send_message', 'get_session_context', 'open_canvas', 'tool_search_tool', 'report_intent']) {
   assert.equal(await chief.hooks.onPreToolUse({ toolName: tool, toolArgs: {} }), undefined, `the Chief can use ${tool}`);
@@ -246,16 +244,15 @@ assert.equal(chief.proc.board.meta.leadLinks.T1, eng.link, 'the Chief remembers 
 //    and never asks the human directly or messages the Chief with updates.
 for (const tool of ['edit', 'bash', 'view', 'skill', 'openBrowserPage']) assert.equal(await eng.hooks.onPreToolUse({ toolName: tool, toolArgs: {} }), undefined, `the engineer can use ${tool}`);
 assert.equal(await eng.hooks.onPreToolUse({ toolName: 'task', toolArgs: { agent_type: 'explore', prompt: 'find the theme code' } }), undefined, 'subagents for side lookups are fine');
-assert.match((await eng.hooks.onPreToolUse({ toolName: 'ask_user', toolArgs: {} })).permissionDecisionReason, /ordinary questions/);
-assert.match((await eng.hooks.onPreToolUse({ toolName: 'create_session', toolArgs: { title: 'x', prompt: 'do it' } })).permissionDecisionReason, /the only sessions you start are your reviewers/);
+assert.equal(await eng.hooks.onPreToolUse({ toolName: 'ask_user', toolArgs: {} }), undefined);
+assert.equal(await eng.hooks.onPreToolUse({ toolName: 'create_session', toolArgs: { title: 'x', prompt: 'do it' } }), undefined);
 assert.equal(await eng.hooks.onPreToolUse({ toolName: 'send_message', toolArgs: { session: 'x', message: 'hello' } }), undefined, 'plain messages are fine');
-assert.match((await send(eng, chief.link, 'T1 update: planning.')).denied, /Post progress with grove_update/);
+assert.equal((await send(eng, chief.link, 'T1 update: planning.')).target, chief);
 
 // 5. The engineer chooses the steps first; it can't stop before it has.
 turn(eng);
 let stop = await eng.hooks.onAgentStop({});
-assert.equal(stop.decision, 'block');
-assert.match(stop.reason, /no step in progress.*grove_plan_steps/);
+assert.equal(stop, undefined, 'no stop-hook enforcement');
 res = await eng.call('grove_next');
 assert.match(res.data.guidance, /Choose the steps for this task with grove_plan_steps/);
 assert.match((await eng.call('grove_plan_steps', { steps: [{ kind: 'review' }] })).data, /kind must be one of plan, research, execute, verify/);
@@ -276,12 +273,12 @@ assert.equal(sprite(eng, 'grove-engineer-T1').taskName, 'Tansy', 'sprites carry 
 assert.equal(sprite(eng, 'grove-engineer-T1').name, 'Engineer');
 turn(eng);
 stop = await eng.hooks.onAgentStop({});
-assert.match(stop.reason, /you're on S1 \(Plan\) and haven't submitted it/, 'stopping mid-step is sent back');
+assert.equal(stop, undefined, 'the engineer can stop without a Grove correction loop');
 loadSkill(eng, 'grove-plan');
 assert.deepEqual(eng.proc.engine.task('T1').steps[0].skills, ['grove-plan']);
-res = await eng.call('grove_submit', { step: 'S1', output: 'A short plan.' });
+res = await eng.call('grove_submit', { step: 'S1', output: '' });
 assert.equal(res.ok, false);
-assert.match(res.data, /Submit the complete plan/, 'a submission is checked right away');
+assert.match(res.data, /output is required/, 'empty output is checked right away');
 res = await eng.call('grove_submit', { step: 'S1', output: PLAN });
 assert.equal(res.ok, true, res.data);
 assert.equal(res.data.submitted, 'S1');
@@ -303,11 +300,11 @@ for (const x of res.data.hires) {
   assert.doesNotMatch(m.brief, /You reviewed an earlier version/);
 }
 assert.match(rev.security.brief, /You are the \*\*security reviewer\*\* in a Grove forum/, 'its persona from the agent file');
-assert.equal(sprite(eng, 'grove-T1-reviewer-security').activity, 'plan-review');
-assert.equal(sprite(eng, 'grove-T1-reviewer-security').group, 'T1:S1');
+assert.equal(sprite(eng, 'grove-T1-reviewer-security').activity, 'idle', 'dispatch alone does not mean the reviewer has started working');
+assert.equal(sprite(eng, 'grove-T1-reviewer-security').group, null);
 // Reviewers can't message the Chief or start sessions; they report to the engineer.
-assert.match((await send(rev.security.member, chief.link, 'Chief, a question')).denied, /report to the task's engineer/);
-assert.match((await rev.security.member.hooks.onPreToolUse({ toolName: 'create_session', toolArgs: { title: 'x', prompt: 'y' } })).permissionDecisionReason, /don't start other sessions/);
+assert.equal((await send(rev.security.member, chief.link, 'Chief, a question')).target, chief);
+assert.equal(await rev.security.member.hooks.onPreToolUse({ toolName: 'create_session', toolArgs: { title: 'x', prompt: 'y' } }), undefined);
 let r = await work(rev.security, vote('APPROVE'));
 assert.equal(r.report.target, eng, 'the reviewer reports to the engineer\'s own chat');
 assert.match(r.report.context, /A reviewer reported back; Grove recorded it\. Call grove_next/);
@@ -387,7 +384,7 @@ res = await eng.call('grove_next');
 assert.match(res.data.guidance, /All planned steps are done.*grove_deliver/);
 assert.deepEqual(res.data.results.map((x) => x.step), ['S1 · Plan', 'S2 · Execute: Implement the plan', 'S3 · Verify']);
 turn(eng);
-assert.equal((await eng.hooks.onAgentStop({})).decision, 'block', 'the engineer must deliver (or plan more) before it stops');
+assert.equal(await eng.hooks.onAgentStop({}), undefined, 'the engineer is guided, not forced through a stop loop');
 res = await eng.call('grove_deliver', { summary: 'Dark mode ships with a settings toggle; verified with screenshots.', decisions: ['Kept light as the default theme, so nothing changes for existing users'], ask: 'Approve the change, or say if the toggle belongs in the View menu.' });
 assert.match(res.data.guidance, /open a draft pull request with the change/);
 res = await eng.call('grove_next');
@@ -483,6 +480,7 @@ await settle(chief);
 const eng2 = await startSession('eng-2');
 started(chief, eng2, h2);
 await eng2.hooks.onUserPromptSubmitted({ prompt: h2 });
+turn(eng2);
 const t2 = () => eng2.proc.engine.task('T2');
 assert.equal((await eng2.call('grove_update', { text: 'Querying the last 7 days.' })).ok, true);
 res = await eng2.call('grove_plan_steps', { template: 'research' });
@@ -501,7 +499,7 @@ assert.equal(t2().pause.by, 'Accuracy reviewer');
 assert.equal(sprite(eng2, 'grove-T2-reviewer-accuracy').activity, 'waiting', 'the blocked reviewer waits at the lantern');
 assert.equal(sprite(eng2, 'grove-engineer-T2').activity, 'idle');
 turn(eng2);
-assert.match((await eng2.hooks.onAgentStop({})).reason, /notice:blocked-/, 'the engineer must tell the Chief before it stops');
+assert.equal(await eng2.hooks.onAgentStop({}), undefined, 'human prerequisites are reported without blocking the stop hook');
 notice = (await eng2.call('grove_next')).data.messages[0];
 told = await send(eng2, notice.session, notice.message);
 assert.match(told.context, /is blocked until the human does this: Run `az login --tenant 72f9`/);
@@ -784,6 +782,53 @@ const oldChief = await startSession('old-chief');
 assert.match(oldChief.proc.error, /from an earlier Grove process \(format version 1; this Grove uses version 2\)\. Old boards aren't migrated: start a new Chief of Staff chat/);
 assert.equal(oldChief.proc.role, 'none');
 assert.equal(await fs.readFile(path.join(oldRoot, 'board.json'), 'utf8'), oldBoard, 'left untouched');
+
+// Operational recovery preserves findings; explicit human direction can adapt the route and finish.
+{
+  const recoveryChief = await startSession('recovery-chief');
+  const created = await recoveryChief.call('grove_create_task', { title: 'Recover freely', goal: 'Implement locally',
+    kind: 'code', destination: { mode: 'scratch' }, chiefSession: recoveryChief.link });
+  const firstEngineer = await startSession('first-engineer');
+  started(recoveryChief, firstEngineer, created.data.handoff.prompt);
+  await firstEngineer.hooks.onUserPromptSubmitted({ prompt: created.data.handoff.prompt });
+  await firstEngineer.call('grove_plan_steps', { steps: [{ kind: 'execute', reviewers: ['code', 'architecture'] }] });
+  const beforeId = sprite(firstEngineer, 'grove-engineer-T1').id;
+  const handoff = await recoveryChief.call('grove_handoff', { taskId: 'T1' });
+  const engineer = await startSession('replacement-engineer');
+  started(recoveryChief, engineer, handoff.data.handoff.prompt);
+  await engineer.hooks.onUserPromptSubmitted({ prompt: handoff.data.handoff.prompt });
+  turn(engineer);
+  assert.equal(sprite(engineer, 'grove-engineer-T1').id, beforeId, 'the engineer character survives backing-chat replacement');
+  const submitted = await engineer.call('grove_submit', { output: 'Implemented the change; targeted tests pass.' });
+  const code = await dispatch(engineer, submitted.data.hires.find((h) => h.title.includes('Code reviewer')));
+  const architecture = await dispatch(engineer, submitted.data.hires.find((h) => h.title.includes('Architecture reviewer')));
+  await work(architecture, async () => 'The boundary needs another look.\nVERDICT: CHANGES');
+  const oldTicket = engineer.proc.leadTask().tickets.find((k) => k.specialty === 'code').id;
+  const recovered = await engineer.call('grove_recover', { reviewer: 'code', note: 'Native messaging cannot reach this reviewer; replacing its chat.' });
+  assert.equal(recovered.ok, true, recovered.data);
+  assert.equal(recovered.data.hires.length, 1);
+  const replacement = await dispatch(engineer, recovered.data.hires[0]);
+  await work(code, vote('APPROVE'));
+  assert.equal(engineer.proc.leadTask().tickets.find((k) => k.id === oldTicket).status, 'cancelled', 'late approval cannot revive the superseded assignment');
+  await work(replacement, vote('APPROVE'));
+  assert.equal(engineer.proc.leadTask().stage, 'working', 'the other reviewer objection still needs a response');
+  await recoveryChief.call('grove_record_decision', { taskId: 'T1', decision: 'changes', note: 'Keep it local and deliver now, without further review.' });
+  const adapted = await engineer.call('grove_submit', { output: 'Implemented the local change; tests pass. The human accepted the remaining architectural tradeoff.',
+    reviewers: [], note: 'The human explicitly directed local delivery without further review.' });
+  assert.equal(adapted.ok, true, adapted.data);
+  const delivered = await engineer.call('grove_deliver', { summary: 'The local implementation is complete and verified.',
+    ship: false, complete: true, decisions: ['The human directed local delivery without further review.'] });
+  assert.equal(delivered.ok, true, delivered.data);
+  assert.equal(engineer.proc.leadTask().stage, 'done');
+  assert.equal(engineer.proc.leadTask().steps.some((s) => s.ship), false, 'no forced PR step');
+  const finalNotice = delivered.data.messages[0];
+  assert.ok(finalNotice, 'completion is still reported to the Chief');
+  const notified = await send(engineer, finalNotice.session, finalNotice.message);
+  assert.match(notified.context, /don't ask for approval again/);
+  const report = await fs.readFile(delivered.data.report, 'utf8');
+  assert.match(report, /boundary needs another look/, 'prior review findings remain in the quality report');
+  assert.match(report, /replacing its chat/, 'recovery is visible in the report');
+}
 
 for (const s of all) await s.proc.dispose();
 await fs.rm(tmp, { recursive: true, force: true });

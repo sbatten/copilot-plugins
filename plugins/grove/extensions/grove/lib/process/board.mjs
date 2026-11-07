@@ -464,18 +464,17 @@ export class Board {
   // `via` is 'grove' when the human decided in the canvas inbox rather than in the Chief's chat.
   // Read, dedupe and write run as one queued job, so two clicks can't both read the same last seq. An inbox
   // click identical to one still waiting to be applied (seq > appliedThrough) isn't appended twice. Chat
-  // decisions and workspace-repair grants are deliberate and always appended: the caller's appliedThrough can
+  // decisions are deliberate and always appended: the caller's appliedThrough can
   // lag the owner's save, so deduping them could silently drop a repeated, already-applied decision.
-  appendDecision(taskId, { action, note, via = 'chat', ship, workspaceRepair }, { appliedThrough = 0 } = {}) {
+  appendDecision(taskId, { action, note, via = 'chat', ship }, { appliedThrough = 0 } = {}) {
     return this.queue(() => this.taskLock(taskId, async () => {
       await this.assertChief();
       const items = await this.readDecisions(taskId);
-      const same = via === 'grove' && !workspaceRepair && items.find((d) => d.seq > appliedThrough
-        && d.action === action && d.via === via && (d.note ?? null) === (note ?? null) && d.ship === ship
-        && !d.workspaceRepair);
+      const same = via === 'grove' && items.find((d) => d.seq > appliedThrough
+        && d.action === action && d.via === via && (d.note ?? null) === (note ?? null) && d.ship === ship);
       if (same) return { item: same, duplicate: true };
       const item = { seq: (items.at(-1)?.seq ?? 0) + 1, action, note, via, at: Date.now(),
-        ...(ship !== undefined ? { ship } : {}), ...(workspaceRepair ? { workspaceRepair } : {}) };
+        ...(ship !== undefined ? { ship } : {}) };
       items.push(item);
       await writeJson(this.decisionsFile(taskId), { format: FORMATS.decisions, version: VERSION, task: taskId, items });
       return { item, duplicate: false };
@@ -551,12 +550,11 @@ export async function readMemberLink(file) {
   const data = await readJson(file, MEMBER_FORMAT);
   if (!data) return null;
   if (!isBoardId(data.boardId) || !isTicketId(data.ticketId) || typeof data.token !== 'string') throw new BoardError('storage_corrupt', `${file} is malformed; leaving it untouched.`);
-  return { boardId: data.boardId, ticketId: data.ticketId, token: data.token, revivals: Number.isInteger(data.revivals) ? data.revivals : 0,
-    ...(Number.isInteger(data.submissionVersion) ? { submissionVersion: data.submissionVersion } : {}),
-    ...(typeof data.setupError === 'string' ? { setupError: data.setupError } : {}) };
+  return { boardId: data.boardId, ticketId: data.ticketId, token: data.token,
+    ...(Number.isInteger(data.submissionVersion) ? { submissionVersion: data.submissionVersion } : {}) };
 }
 
-export function writeMemberLink(file, { boardId, ticketId, token, revivals = 0, submissionVersion, setupError }) {
-  return writeJson(file, { format: MEMBER_FORMAT, version: VERSION, boardId, ticketId, token, revivals,
-    ...(submissionVersion !== undefined ? { submissionVersion } : {}), ...(setupError ? { setupError } : {}), at: Date.now() });
+export function writeMemberLink(file, { boardId, ticketId, token, submissionVersion }) {
+  return writeJson(file, { format: MEMBER_FORMAT, version: VERSION, boardId, ticketId, token,
+    ...(submissionVersion !== undefined ? { submissionVersion } : {}), at: Date.now() });
 }

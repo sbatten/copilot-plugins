@@ -45,7 +45,7 @@ assert.equal(t.stage, 'working');
 assert.equal(currentStep(t).id, 'S1');
 assert.equal(t.tickets.length, 0, 'no hire for the engineer\'s own work');
 assert.equal(currentStep(t).evidenceAttempt, undefined, 'plans have no evidence folder');
-await assert.rejects(submit(t, 'Too short'), /complete plan/, 'submissions are checked right away');
+await assert.rejects(submit(t, ''), /Submit the plan/, 'empty output is rejected without an arbitrary length threshold');
 await assert.rejects(engine.submit(t.id, 'S2', LONG('A plan for the change')), /step in progress is S1/);
 await assert.rejects(submit(t, `${LONG('Plan')}\nBLOCKED: Need access`), /call grove_blocked/);
 await submit(t, LONG('## Plan\nSteps, files, risks, criteria and verification.'));
@@ -95,8 +95,8 @@ assert.equal(t.feedback.at(-1).from, 'verification');
 t = task({ template: 'research' }, 'research');
 engine.humanDecision({ taskId: t.id, action: 'hold', note: 'Wait for me' });
 assert.equal(t.stage, 'on-hold');
-assert.match(engine.decisionError(t, 'approve'), /nothing to approve/);
-assert.match(engine.decisionError(t, 'retry'), /isn't blocked/);
+assert.equal(engine.decisionError(t, 'approve'), null, 'human approval can authorize ongoing work');
+assert.equal(engine.decisionError(t, 'retry'), null, 'retry need not match stale tracker state');
 engine.humanDecision({ taskId: t.id, action: 'resume' });
 assert.equal(t.stage, 'working', 'the engineer carries on with its step');
 // ... and a review that was open re-issues only the reviewers who hadn't voted.
@@ -134,7 +134,7 @@ assert.equal(t.stage, 'blocked');
 assert.equal(t.pause.by, 'Engineer');
 engine.humanDecision({ taskId: t.id, action: 'hold' });
 assert.equal(t.stage, 'on-hold');
-assert.match(engine.decisionError(t, 'retry'), /isn't blocked/);
+assert.equal(engine.decisionError(t, 'retry'), null);
 engine.humanDecision({ taskId: t.id, action: 'resume' });
 assert.equal(t.stage, 'working');
 
@@ -150,14 +150,13 @@ engine.postUpdate(t.id, 'Query is running.');
 assert.equal(t.updates.at(-1).text, 'Query is running.');
 assert.match(t.history.at(-1).text, /^Update: Query is running\./);
 
-// ---- review churn: an unchanged revision escalates; no step reviews more than MAX_STEP_ROUNDS rounds ----
+// ---- review churn: repeated prose can describe changed code; round limits still apply ----
 t = task({ steps: [{ kind: 'execute', reviewers: ['code'] }] });
 await submit(t, LONG('Implemented v1'));
 await report(t, working(t)[0], 'Needs a test.\nVERDICT: CHANGES');
 assert.equal(t.stage, 'working');
 await submit(t, LONG('Implemented v1'));
-assert.equal(t.stage, 'escalated', 'the same output after "changes" would repeat the review');
-assert.match(t.escalation.reason, /submitted the same execute/);
+assert.equal(t.stage, 'reviewing', 'summary wording is not a proxy for whether the code changed');
 t = task({ steps: [{ kind: 'execute', reviewers: ['code'] }] });
 for (let i = 1; ; i++) {
   await submit(t, LONG(`Implemented v${i}`));
@@ -235,7 +234,7 @@ actions = engine.humanActions([t]);
 assert.deepEqual([actions[0].pr, actions[0].ask], [{ url: 'https://github.com/acme/app/pull/8', number: 8, draft: true }, 'Approve, or keep the old name?']);
 assert.equal(engine.observePr(t, { state: 'OPEN', isDraft: true, statusCheckRollup: [{ name: 'a', status: 'COMPLETED', conclusion: 'FAILURE' }] }), true, 'the draft\'s checks are recorded for the report');
 assert.equal(t.stage, 'awaiting-approval', 'without moving the task');
-assert.throws(() => engine.planSteps(t.id, { redoFrom: t.steps.at(-1).id }), /waiting on the human/);
+assert.throws(() => engine.planSteps(t.id, { redoFrom: t.steps.at(-1).id }), /pull request step/);
 t = await deliver({ steps: [{ kind: 'execute' }] }, undefined, 'NO PR: not a git repository');
 assert.equal(t.stage, 'awaiting-approval');
 assert.equal(t.ship.noPr, 'not a git repository');
@@ -373,7 +372,8 @@ await assert.rejects(evEngine.submit('T91', 'S1', LONG('Changed it')), /isn't va
 const r3 = evEngine.createTask({ id: 'T92', title: 'Change', goal: 'g', criteria: [] });
 evEngine.planSteps('T92', { steps: [{ kind: 'execute' }] });
 assert.deepEqual(await evEngine.checkStep(r3, r3.steps[0], LONG('Changed it')), { ok: true }, 'no evidence is fine');
-await assert.rejects(evEngine.submit('T92', 'S1', 'x'), /summary of what you did/);
+await evEngine.submit('T92', 'S1', 'Done.');
+assert.equal(r3.steps[0].status, 'done', 'quality is not inferred from summary length');
 
 // Task names: unique on a board (a numeral after a full lap), different starts per board, found by id or name.
 {
@@ -420,4 +420,13 @@ await assert.rejects(evEngine.submit('T92', 'S1', 'x'), /summary of what you did
   assert.equal(engine.decisionResult(t, 99), null);
 }
 
+// Human approval resolves a real prerequisite without requiring a repair flag or exact transition.
+{
+  const taskWithBlocker = task({ steps: [{ kind: 'execute' }] });
+  engine.block(taskWithBlocker.id, { need: 'Restore the local service' });
+  engine.humanDecision({ taskId: taskWithBlocker.id, action: 'approve', note: 'It is restored; proceed.' });
+  assert.equal(taskWithBlocker.stage, 'working');
+  engine.humanDecision({ taskId: taskWithBlocker.id, action: 'retry', note: 'Continue.' });
+  assert.equal(taskWithBlocker.stage, 'working', 'a repeated continuation does not reset or discard active work');
+}
 console.log('engine tests passed');
