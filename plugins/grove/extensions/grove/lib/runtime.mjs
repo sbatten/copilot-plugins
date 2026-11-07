@@ -136,7 +136,7 @@ export class GroveRuntime {
   openResult(inst, data) {
     return {
       url: `http://127.0.0.1:${inst.port}/`,
-      title: `Grove · ${inst.sceneId}`,
+      title: inst.sceneId === 'default' ? 'Grove' : `Grove · ${inst.sceneId}`,
       status: `${data.agents.length} agent${data.agents.length === 1 ? '' : 's'}`,
     };
   }

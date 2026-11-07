@@ -195,7 +195,10 @@ const proc = {
 };
 const runtime = new GroveRuntime({ webDir: path.join(tmp, 'web'), dataDir: path.join(tmp, 'data'), log: () => {} });
 runtime.setProcess(proc);
-const { url } = await runtime.open('grove', {});
+const { url, title } = await runtime.open('grove', {});
+assert.equal(title, 'Grove', 'the default scene does not add a title suffix');
+assert.equal((await runtime.open('grove', { scene: 'demo' })).title, 'Grove · demo', 'named scenes retain their title suffix');
+assert.equal((await runtime.open('grove', { scene: 'default' })).title, 'Grove', 'switching back to the default scene removes the suffix');
 const get = (p, headers = {}) => fetch(new URL(p, url), { headers, redirect: 'manual' });
 const post = (p, body, headers = {}) => fetch(new URL(p, url), { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
 
