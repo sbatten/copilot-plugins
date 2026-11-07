@@ -466,6 +466,17 @@ Process state is a **board** in the Chief's session data, at `files/grove/`:
 Engineers and reviewers find the board through
 `<COPILOT_HOME or ~/.copilot>/extension-data/grove-agent-monitor/boards/<board-id>.json`.
 
+**A fresh Chief of Staff chat can resume an existing Grove.** Before creating
+tasks, call `grove_status` to identify its `boardId`, then `grove_resume` with
+that id and the new chief's `chiefSession` (`openLink` from
+`get_current_session`), with the human's permission. All tasks, engineers,
+hand-offs, decisions and evidence stay on the original board. Future notices
+go to the new chief, which can dismiss or otherwise manage old tasks normally.
+The previous chief becomes read-only. A `grove-chief.json` link in the new
+session's files remembers the resumed board across restarts. Simply viewing
+another board does not take it over; creating tasks without resuming still
+starts a separate Grove.
+
 **Board format:** version 2 is the one-engineer process. A board from the
 earlier process (version 1: a task lead with a persona session per step)
 isn't migrated. Grove leaves it untouched and says so: start a new Chief of
@@ -676,6 +687,7 @@ skills/grove-sprites/
 | --- | --- | --- |
 | `grove_create_task` | Chief | Open a task `{ title, goal, kind, destination, criteria? }`. Pass the exact returned handoff to `create_session`; workspace/worktree are omitted for scratch. |
 | `grove_handoff` | Chief | Get a fresh hand-off for a task whose engineer never started, stalled or was lost. The new engineer picks the task up from the board. |
+| `grove_resume` | Fresh Chief | Resume an existing board with the human's permission; keep its tasks and engineers and route notices to this chat. |
 | `grove_record_decision` | Chief | Record what the human decided, asked or said: `approve` (`ship: false` to skip the PR), `changes`, `note`, `question`, `hold`, `resume`, `retry`, `merge` or `cancel`, with their words as `note`. Grove checks it applies to the task's stage. It returns the message to send the engineer. |
 | `grove_cancel_task` | Chief | Cancel a task. |
 | `grove_status` | anyone | Show each task's stage, kind, engineer and reviewers (with chat links), steps and their review votes, recent history, and what's waiting on the human. |
