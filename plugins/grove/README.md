@@ -381,7 +381,7 @@ Tasks run in parallel, one engineer session each.
 | Code reviewer | Claude Opus 5.5 | `grove-reviewer-code.agent.md` |
 | Architecture reviewer | GPT-6.1 Sol | `grove-reviewer-architecture.agent.md` |
 | Tests reviewer | GPT-6.1 Sol | `grove-reviewer-tests.agent.md` |
-| Custom-focus reviewers (accuracy, privacy…) | rotation: Grok 4.7, Gemini 4, GPT-6.1 Sol, Claude Opus 5.5 | `grove-reviewer.agent.md` |
+| Custom-focus reviewers (accuracy, privacy…) | rotation: Gemini 4, GPT-6.1 Sol, Claude Opus 5.5 | `grove-reviewer.agent.md` |
 
 - **How it applies:** The Chief leaves the model choice to the user.
   Engineers and reviewers aren't started *as* custom agents
@@ -391,8 +391,8 @@ Tasks run in parallel, one engineer session each.
   model, overriding a missing or different one, so no specialist session inherits a
   lighter model from the chat that started it.
 - **Rotation:** for the generic reviewer, the list is a rotation, not a
-  fallback order: the first custom focus on a step gets Grok 4.7, the second
-  Gemini 4, and so on.
+  fallback order: the first custom focus on a step gets Gemini 4, the second
+  GPT-6.1 Sol, and so on.
 - **To change a model,** edit the agent file (or `ENGINEER_MODELS`) and
   reinstall the plugin. `tests/agents.test.mjs` requires specialists to name
   one and the Chief to leave it unset.

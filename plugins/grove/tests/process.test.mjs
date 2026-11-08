@@ -492,7 +492,7 @@ assert.equal(sprite(eng2, 'grove-engineer-T2').activity, 'research');
 res = await eng2.call('grove_submit', { step: 'S1', output: '## Answer\nWAU ~12k.\n\n## How\nKusto query over 7 days, filtered to the agents window.' });
 assert.match(res.data.reminder, /didn't see you load the grove-research skill for S1/, 'a reminder, not a refusal');
 const acc = await dispatch(eng2, res.data.hires[0]);
-assert.equal(models.get('Duskwing · Accuracy reviewer'), 'grok-4.7', 'custom focuses take the generic reviewer\'s rotation');
+assert.equal(models.get('Duskwing · Accuracy reviewer'), 'gemini-4-argon', 'custom focuses take the generic reviewer\'s rotation');
 assert.match(acc.brief, /Check the findings yourself: re-run queries/);
 assert.match(acc.brief, /BLOCKED: <exactly what the human must do>/);
 r = await work(acc, async () => 'Kusto returned AADSTS700082 (expired refresh token); I can\'t re-run the query.\nBLOCKED: Run `az login --tenant 72f9`, then tell the Chief of Staff');
@@ -686,7 +686,7 @@ assert.deepEqual(parseModels('---\nmodel:\n  - a-1\n  - b-2\nname: x\n---\n'), [
 assert.deepEqual(parseModels('---\nname: x\n---\n'), []);
 const fiveFocus = { steps: [{ id: 'S1', reviewers: ['a', 'security', 'b', 'c', 'd', 'e'].map((name) => ({ name })) }] };
 const seat = (specialty) => memberModel(fiveFocus, { role: 'reviewer', specialty, step: 'S1', agentType: specialty === 'security' ? 'grove-reviewer-security' : 'grove-reviewer' });
-assert.deepEqual(['a', 'b', 'c', 'd', 'e', 'security'].map(seat), ['grok-4.7', 'gemini-4-argon', 'gpt-6.1-sol', 'claude-opus-5.5', 'grok-4.7', 'claude-opus-5.5'], 'the rotation wraps');
+assert.deepEqual(['a', 'b', 'c', 'd', 'e', 'security'].map(seat), ['gemini-4-argon', 'gpt-6.1-sol', 'claude-opus-5.5', 'gemini-4-argon', 'gpt-6.1-sol', 'claude-opus-5.5'], 'the rotation wraps');
 
 // 16. The shelf. A task waiting on the human can be set aside: it leaves the inbox (at once, before its
 //     engineer's Grove applies it), the Chief leaves the lantern, and the engineer isn't woken. Bringing it

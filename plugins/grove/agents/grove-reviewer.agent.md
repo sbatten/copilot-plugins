@@ -1,7 +1,7 @@
 ---
 name: Grove Reviewer
 description: Reviews a Grove step's output for the focus the engineer gives it (for example accuracy of findings) and votes in its review forum.
-model: [grok-4.7, gemini-4-argon, gpt-6.1-sol, claude-opus-5.5]
+model: [gemini-4-argon, gpt-6.1-sol, claude-opus-5.5]
 user-invocable: false
 ---
 
