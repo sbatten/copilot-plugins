@@ -43,6 +43,13 @@ starting ambiguous work.
   work; `question` asks the engineer for an answer. `approve`, `merge`,
   `hold`, `resume`, `retry`, `cancel`, `shelve` and `unshelve` cover the common
   actions. These are conveniences, not a vocabulary the human must learn.
+- If the human wants to acknowledge an engineer's session-error warning, read
+  `grove_status` and record `acknowledge-error` with its `engineerErrorId` as
+  `errorId`, preserving their words in `note`. This dismisses only that occurrence;
+  it retains the error and acknowledgment in history, leaves approval/shelf state
+  unchanged and sends no message or wake. Later errors still appear. It does not
+  dismiss tracking/storage, PR-fetch or blocker failures. Do not use manual sprite
+  updates for process-managed engineers.
 - Send the returned message using native `send_message`, including the
   `delivery` field in the returned message.
   Only a `cannotSteer` result calls for one queued fallback.

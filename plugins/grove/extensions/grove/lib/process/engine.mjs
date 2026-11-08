@@ -44,7 +44,7 @@ export const HEARTBEAT_TIMEOUT_MS = 4 * 60 * 1000;
 export const LEAD = 'lead';
 
 export const STEP_KINDS = Object.freeze(['plan', 'research', 'execute', 'verify']);
-export const DECISIONS = Object.freeze(['approve', 'changes', 'note', 'question', 'hold', 'resume', 'retry', 'merge', 'cancel', 'shelve', 'unshelve']);
+export const DECISIONS = Object.freeze(['approve', 'changes', 'note', 'question', 'hold', 'resume', 'retry', 'merge', 'cancel', 'shelve', 'unshelve', 'acknowledge-error']);
 // The skill the engineer loads for each kind of step.
 export const KIND_SKILLS = Object.freeze({ plan: 'grove-plan', research: 'grove-research', execute: 'grove-execute', verify: 'grove-verify' });
 // What the human says the task is about; it picks the engineer's model.
@@ -619,7 +619,7 @@ export class ProcessEngine {
         continue;
       }
       try {
-        this.humanDecision({ taskId: task.id, action: d.action, note: d.note ?? '', ship: typeof d.ship === 'boolean' ? d.ship : undefined });
+        this.humanDecision({ taskId: task.id, action: d.action, note: d.note ?? '', ship: typeof d.ship === 'boolean' ? d.ship : undefined, errorId: d.errorId, errorOwner: d.errorOwner });
         this.noteDecision(task, d, 'applied');
         applied.push(d);
       } catch (err) {
@@ -1213,7 +1213,13 @@ export class ProcessEngine {
   // ---------- human decisions ----------
 
   // Why a decision can't apply to the task as it stands, or null. The Chief checks before recording one.
-  decisionError(task, action, note = '', { ship } = {}) {
+  decisionError(task, action, note = '', { ship, errorId, errorOwner } = {}) {
+    if (action === 'acknowledge-error') {
+      if (ship !== undefined) return 'ship only applies to "approve".';
+      return task.lead?.error && errorId && errorId === sessionErrorId(task.lead.error)
+        && (errorOwner === undefined || errorOwner === task.owner)
+        ? null : 'The engineer error changed or is no longer active. Read grove_status for the current errorId.';
+    }
     if (task.stage === 'shelved') {
       if (action === 'unshelve' || action === 'cancel') return null;
       if (action === 'shelve') return `${task.id} is already on the shelf.`;
@@ -1245,11 +1251,17 @@ export class ProcessEngine {
     }
   }
 
-  humanDecision({ taskId, action, note = '', ship }) {
+  humanDecision({ taskId, action, note = '', ship, errorId, errorOwner }) {
     const task = this.task(taskId);
     const msg = clip(note, 4000);
-    const err = this.decisionError(task, action, msg, { ship });
+    const err = this.decisionError(task, action, msg, { ship, errorId, errorOwner });
     if (err) throw new ProcessError('invalid_state', err);
+    if (action === 'acknowledge-error') {
+      task.lead.errorAcknowledgment = { errorId, owner: task.owner, at: now(), note: msg, error: task.lead.error };
+      delete task.lead.error;
+      this.changed(task, `You acknowledged the engineer's session error: ${task.lead.errorAcknowledgment.error.message}${msg ? ` (${msg})` : ''}.`);
+      return task;
+    }
     if (action === 'cancel') {
       task.shelf = null;
       return this.cancelTask(taskId, msg || 'Cancelled by you.');
@@ -1645,6 +1657,11 @@ function rateLimited(error) {
 // Only these mean the reviewer's chat is gone and a new one is needed.
 function chatGone(error) {
   return /unknown chat|no such (chat|session)|not found|no longer exists|was deleted|has been closed/i.test(String(error ?? ''));
+}
+
+// Older saved errors predate occurrence ids.
+export function sessionErrorId(e) {
+  return e ? e.id ?? JSON.stringify([e.message, e.at, e.count]) : null;
 }
 
 // A session error as reported in a reviewer's heartbeat: { message, at, count }, or null.

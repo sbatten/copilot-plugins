@@ -28,10 +28,11 @@
 // Grove's preToolUse hook supplies routing arguments without denying native tools.
 import path from 'node:path';
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import {
   ProcessEngine, ProcessError, MAX_ROUNDS, memberTitle, stepLabel, stageLabel, KIND_LABELS, STEP_KINDS, TEMPLATES, REVIEWER_FOCUS, LEAD,
-  WAITING_STAGES, PAUSED_STAGES, SHIPPING_STAGES, DECISIONS, TASK_KINDS, KIND_SKILLS, STAGE_LABELS, SHELVABLE, prLine, currentStep,
+  WAITING_STAGES, PAUSED_STAGES, SHIPPING_STAGES, DECISIONS, TASK_KINDS, KIND_SKILLS, STAGE_LABELS, SHELVABLE, prLine, currentStep, sessionErrorId,
 } from './engine.mjs';
 import { execFile } from 'node:child_process';
 import {
@@ -62,10 +63,10 @@ const PR_POLL_MS = 2 * 60 * 1000;
 const PR_FIELDS = 'state,isDraft,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,headRefOid,url,number';
 const DECISION_OUTCOMES = {
   question: 'asked', hold: 'on hold', resume: 'back to work', retry: 'back to work', merge: 'being merged', note: 'passed on',
-  shelve: 'on the shelf', unshelve: 'back in the inbox',
+  shelve: 'on the shelf', unshelve: 'back in the inbox', 'acknowledge-error': 'session error acknowledged',
 };
 // Decisions the engineer has nothing to do for: its Grove applies them from the board without waking it.
-const QUIET_DECISIONS = new Set(['shelve', 'unshelve']);
+const QUIET_DECISIONS = new Set(['shelve', 'unshelve', 'acknowledge-error']);
 // Where an engineer's chat link came from. Each is tied to the engineer that holds the current hand-off; a
 // link with no source was written by an older Grove that didn't check, and is never used.
 const ROUTE_SOURCES = new Set(['chief', 'self', 'member']);
@@ -719,7 +720,11 @@ export class GroveProcess {
         const { lost } = await this.engine.refresh();
         if (this.role === 'lead' && lost.includes(this.leadTaskId)) this.retire();
         if (this.role === 'member') await this.checkMemberStillNeeded();
+        this.reconcileErrorClear();
         const task = this.leadTask();
+        // A new error can race a Chief acknowledgment and have its first save refused.
+        // Retry only into an empty slot; never replace a different persisted occurrence.
+        if (this.sessionError && task?.lead && !task.lead.error && this.engine.owns(task)) await this.reportError();
         if (task && (TERMINAL.has(task.stage) || PAUSED_STAGES.has(task.stage) || task.stage === 'shelved')) this.outbox.length = 0;
         this.observeSession();
       }
@@ -1169,13 +1174,18 @@ export class GroveProcess {
   // through its heartbeat.
   noteError(message) {
     const text = clipText(String(message ?? '').replace(/\s+/g, ' ').trim() || 'unknown error', 240);
-    this.sessionError = { message: text, at: Date.now(), count: (this.sessionError?.message === text ? this.sessionError.count : 0) + 1 };
+    this.pendingErrorClear = null;
+    this.sessionError = { id: randomUUID(), message: text, at: Date.now(), count: (this.sessionError?.message === text ? this.sessionError.count : 0) + 1 };
     void this.reportError().catch((err) => this.log(`Grove could not record an error: ${err.message}`, 'warning'));
   }
 
   clearError() {
     const task = this.role === 'lead' ? this.leadTask() : null;
     if (!this.sessionError && !(task?.lead?.error && this.engine.owns(task))) return;
+    if (task?.lead && this.engine.owns(task)) {
+      const error = this.sessionError ?? task.lead.error;
+      this.pendingErrorClear = { taskId: task.id, owner: task.owner, errorId: sessionErrorId(error) };
+    }
     this.sessionError = null;
     void this.reportError().catch((err) => this.log(`Grove could not clear an error: ${err.message}`, 'warning'));
   }
@@ -1185,14 +1195,33 @@ export class GroveProcess {
     const task = this.role === 'lead' ? this.leadTask() : null;
     if (task?.lead && this.engine.owns(task)) {
       const e = this.sessionError;
+      if (!e) {
+        this.reconcileErrorClear();
+        return undefined;
+      }
+      const ack = task.lead.errorAcknowledgment;
+      if (ack?.owner === task.owner && ack.errorId === sessionErrorId(e)) return undefined;
       const first = e && task.lead.error?.message !== e.message;
-      if (e) task.lead.error = e;
-      else delete task.lead.error;
+      task.lead.error = e;
       this.engine.changed(task, first ? `The engineer hit an error: ${e.message}` : null);
       return undefined;
     }
     this.onChange();
     return undefined;
+  }
+
+  reconcileErrorClear() {
+    const pending = this.pendingErrorClear;
+    if (!pending) return;
+    const task = this.role === 'lead' ? this.leadTask() : null;
+    if (!task || !this.engine.owns(task) || task.id !== pending.taskId || task.owner !== pending.owner
+      || this.sessionError || sessionErrorId(task.lead?.error) !== pending.errorId) {
+      this.pendingErrorClear = null;
+      return;
+    }
+    // Keep the occurrence until refresh confirms the write, so a refused save can be retried on poll.
+    delete task.lead.error;
+    this.engine.changed(task, null);
   }
 
   // ---------- session events ----------
@@ -1704,7 +1733,8 @@ export class GroveProcess {
 - retry: they fixed what a blocked task needed.
 - merge: merge the task's PR.
 - shelve: set a task that's waiting on them aside for later ("not now", "park it", "I'll come back to it"). It leaves their inbox, the engineer rests, and everything is kept.
-- unshelve: put a shelved task back in their inbox. (Any other answer about a shelved task, such as "changes" to run it again, takes it off the shelf by itself.)
+- unshelve: put a shelved task back in their inbox. (A work direction such as "changes" takes it off the shelf by itself; acknowledging an error does not.)
+- acknowledge-error: acknowledge only the engineer session error identified by errorId from grove_status. Keeps stage, shelf and history intact, without waking anyone. Does not dismiss tracking, PR or blocker failures.
 - cancel: drop the task.`,
         parameters: {
           type: 'object',
@@ -1713,14 +1743,15 @@ export class GroveProcess {
             decision: { type: 'string', enum: [...DECISIONS] },
             note: { type: 'string', description: 'The human\'s own words (required for changes, note and question).' },
             ship: { type: 'boolean', description: 'approve only: false to finish a code change without opening a PR.' },
+            errorId: { type: 'string', description: 'acknowledge-error only: engineerErrorId from grove_status; targets that occurrence, not later errors.' },
           },
           required: ['taskId', 'decision'],
         },
-        handler: guarded(CHIEF, async ({ taskId: id, decision, note, ship }) => {
+        handler: guarded(CHIEF, async ({ taskId: id, decision, note, ship, errorId }) => {
           if (!DECISIONS.includes(decision)) throw new ProcessError('invalid_input', `decision must be one of ${DECISIONS.join(', ')}.`);
           if (ship !== undefined && typeof ship !== 'boolean') throw new ProcessError('invalid_input', 'ship must be true or false.');
           const msg = typeof note === 'string' ? note.trim() : '';
-          return this.recordDecision(id, decision, msg, { ship });
+          return this.recordDecision(id, decision, msg, { ship, errorId });
         }),
       },
       {
@@ -2153,22 +2184,22 @@ export class GroveProcess {
     };
   }
 
-  async recordDecision(id, decision, note, { via = 'chat', ship, expectedStages } = {}) {
+  async recordDecision(id, decision, note, { via = 'chat', ship, errorId, expectedStages } = {}) {
     await this.checkChief();
     await this.engine.refresh();
     let before;
-    const { task: t, item, duplicate } = await this.board.decide(id, { action: decision, note, via, ship }, (current, items, input) => {
+    const { task: t, item, duplicate } = await this.board.decide(id, { action: decision, note, via, ship, errorId }, (current, items, input) => {
       before = current.stage;
       const err = expectedStages && !expectedStages.includes(current.stage)
         ? `${id} isn't ready for this inbox action.`
-        : this.engine.decisionError(current, decision, note, { ship });
+        : this.engine.decisionError(current, decision, note, { ship, errorId });
       const last = items.at(-1);
       if (err && last?.action === decision && (decision === 'cancel' && current.stage === 'cancelled'
         || via === 'grove' && last.via === via && (last.note ?? '') === (note ?? '') && last.ship === ship)) {
         return { item: last, duplicate: true };
       }
       if (err) throw new ProcessError('invalid_state', err);
-      const item = { ...input, seq: (last?.seq ?? 0) + 1, at: Date.now() };
+      const item = { ...input, ...(decision === 'acknowledge-error' ? { errorOwner: current.owner } : {}), seq: (last?.seq ?? 0) + 1, at: Date.now() };
       const task = this.engine.projectDecisions(current, [...items, item]);
       return { item, task, duplicate: false };
     });
@@ -2455,7 +2486,7 @@ export class GroveProcess {
         engineer: t.lead ? this.engineerStatus(t) : TERMINAL.has(t.stage) ? null : 'not started: call grove_handoff and create_session',
         ...(this.decisionView(t.id) ? { decision: this.decisionView(t.id) } : {}),
         ...(t.decisionResults?.length ? { decisions: t.decisionResults.slice(-5).map((r) => ({ seq: r.seq, action: r.action, result: r.result, ...(r.reason ? { reason: r.reason } : {}) })) } : {}),
-        ...(errorText(t.lead?.error) ? { engineerError: errorText(t.lead.error) } : {}),
+        ...(errorText(t.lead?.error) ? { engineerError: errorText(t.lead.error), engineerErrorId: sessionErrorId(t.lead.error) } : {}),
         reviewers: Object.values(t.members ?? {}).map((m) => ({ reviewer: m.title, session: m.link, status: m.status, worktree: !!m.worktree })),
         steps: this.stepsSummary(t),
         delivery: t.delivery ? { summary: t.delivery.summary, ship: !!t.delivery.ship } : null,

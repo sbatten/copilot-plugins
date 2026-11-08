@@ -123,7 +123,50 @@ try {
   assert.equal(notifications, before.notifications, 'unchanged refreshes do not invalidate');
   assert.equal(states.length, before.pushes, 'unchanged state is not pushed to SSE');
   assert.deepEqual(errors, []);
-  console.log('canvas refresh tests passed: claim, relay, prompt adoption and unchanged SSE no-op');
+
+  engineer.noteError('Request failed');
+  await engineer.board.flush();
+  const failed = nextState();
+  await chief.poll();
+  assert.equal(engineerSprite((await failed)[0]).error, 'Session error: Request failed');
+
+  // The only successful activity is followed by a refused write. Poll must deliver its clear to SSE.
+  engineer.board.staleTasks.add('T1');
+  engineer.onEvent({ type: 'assistant.message', data: { content: 'Recovered.' } });
+  await assert.rejects(engineer.board.flush(), { code: 'stale_task' });
+  await engineer.poll();
+  await engineer.board.flush();
+  const cleared = nextState();
+  await chief.poll();
+  assert.equal(engineerSprite((await cleared)[0]).error, '', 'SSE receives a poll-reconciled clear');
+  assert.ok(errors.some((message) => message.includes('stale write') || message.includes('needs a reload')));
+  errors.length = 0;
+
+  engineer.noteError('Another request failed');
+  await engineer.board.flush();
+  const failedAgain = nextState();
+  await chief.poll();
+  assert.match(engineerSprite((await failedAgain)[0]).error, /Another request failed/);
+  const errorId = chief.status('T1').tasks[0].engineerErrorId;
+  const acknowledged = nextState();
+  const acknowledgment = await call(chief, 'grove_record_decision', {
+    taskId: 'T1', decision: 'acknowledge-error', errorId, note: 'Seen.',
+  });
+  assert.equal(acknowledgment.message, null);
+  assert.equal(engineerSprite((await acknowledged)[0]).error, '', 'SSE receives a Chief acknowledgment without an engineer turn');
+  await engineer.poll();
+  await engineer.reportError();
+  engineer.observeSession();
+  await engineer.board.flush();
+  await chief.poll();
+  assert.equal(engineerSprite(await runtime.invoke('observer', 'getState', {})).error, '');
+  engineer.noteError('Another request failed');
+  await engineer.board.flush();
+  const subsequent = nextState();
+  await chief.poll();
+  assert.match(engineerSprite((await subsequent)[0]).error, /Another request failed/, 'subsequent occurrences still reach SSE');
+  assert.deepEqual(errors, []);
+  console.log('canvas refresh tests passed: adoption, unchanged no-op, refused clear, acknowledgment and subsequent error SSE delivery');
 } finally {
   response?.destroy();
   request?.destroy();
