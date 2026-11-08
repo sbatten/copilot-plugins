@@ -1174,7 +1174,8 @@ export class GroveProcess {
   }
 
   clearError() {
-    if (!this.sessionError) return;
+    const task = this.role === 'lead' ? this.leadTask() : null;
+    if (!this.sessionError && !(task?.lead?.error && this.engine.owns(task))) return;
     this.sessionError = null;
     void this.reportError().catch((err) => this.log(`Grove could not clear an error: ${err.message}`, 'warning'));
   }
