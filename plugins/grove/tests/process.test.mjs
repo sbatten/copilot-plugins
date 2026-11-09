@@ -290,10 +290,12 @@ assert.deepEqual(res.data.hires.map((x) => [x.tool, x.title, x.relationship]), [
 assert.equal(sprite(eng, 'grove-engineer-T1').activity, 'plan-review', 'the engineer joins its reviewers at the lectern');
 assert.equal(sprite(eng, 'grove-engineer-T1').group, 'T1:S1');
 const rev = {};
+const hires = {};
 for (const x of res.data.hires) {
   assert.match(x.prompt, /If Grove adds nothing else, it is not loaded in this chat: say so in one line and end your turn\.$/, 'a chat without Grove stops instead of asking for its brief');
   const m = await dispatch(eng, x);
   rev[x.title.replace(/^Tansy · | reviewer$/g, '').toLowerCase()] = m;
+  hires[x.title.replace(/^Tansy · | reviewer$/g, '').toLowerCase()] = x;
   assert.doesNotMatch(m.brief, /not loaded in this chat/, 'Grove replaces the hire text with the brief');
   assert.match(m.brief, /^\[grove:T1-rev-[a-z]+-\d+\]\n# Grove review/);
   assert.match(m.brief, /## How Grove reviews work\n# Reviewing in a Grove forum/, 'every reviewer gets the grove-review skill');
@@ -307,7 +309,35 @@ assert.equal(sprite(eng, 'grove-T1-reviewer-security').group, null);
 // Reviewers can't message the Chief or start sessions; they report to the engineer.
 assert.equal((await send(rev.security.member, chief.link, 'Chief, a question')).target, chief);
 assert.equal(await rev.security.member.hooks.onPreToolUse({ toolName: 'create_session', toolArgs: { title: 'x', prompt: 'y' } }), undefined);
+// A host refresh restarts the reviewer's Grove mid-turn. That interrupts the turn, not the assignment: the
+// same chat keeps its ticket and is asked to continue, and a re-sent hire continues rather than restarting.
+{
+  const before = rev.security.member;
+  before.emit({ type: 'assistant.turn_start' });
+  await settle(before);
+  const ticketId = before.proc.work.ticketId;
+  before.proc.dispose();
+  const after = await startSession(before.id, { restart: before });
+  rev.security = { ...rev.security, member: after };
+  assert.equal(after.proc.work.ticketId, ticketId);
+  assert.equal(after.proc.work.resolved, false, 'a restart does not fail the review');
+  assert.equal((await after.proc.board.readResult(ticketId)).status, 'running');
+  assert.equal(after.sent.length, 0, 'it waits for the poll before waking the chat');
+  await after.proc.poll();
+  assert.match(after.sent.at(-1), new RegExp(`Your assignment ${ticketId} \\(Security reviewer for Tansy \\(T1\\) "Add dark mode"\\) was interrupted: this chat restarted\\. Its brief is earlier in this chat`));
+  await after.proc.poll();
+  assert.equal(after.sent.length, 1, 'one continuation per interruption');
+  const again = await after.hooks.onUserPromptSubmitted({ prompt: hires.security.prompt, sessionId: after.id });
+  assert.match(again.modifiedPrompt, /was interrupted: the engineer re-sent it/);
+  assert.doesNotMatch(again.modifiedPrompt, /# Grove review/, 'the brief is not repeated');
+}
 let r = await work(rev.security, vote('APPROVE'));
+{
+  // The recorded review is final: a late heartbeat can't turn it back into running.
+  const w = rev.security.member.proc.work;
+  assert.equal(await rev.security.member.proc.board.writeResult({ ticket: w.ticketId, token: w.token, status: 'running', heartbeat: Date.now() }), false);
+  assert.equal((await rev.security.member.proc.board.readResult(w.ticketId)).status, 'done');
+}
 assert.equal(r.report.target, eng, 'the reviewer reports to the engineer\'s own chat');
 assert.match(r.report.context, /A reviewer reported back; Grove recorded it\. Call grove_next/);
 r = await work(rev.architecture, vote('APPROVE'));
@@ -548,7 +578,10 @@ const eng3 = await startSession('eng-3', { graceMs: 0 });
 started(chief, eng3, h3);
 await eng3.hooks.onUserPromptSubmitted({ prompt: h3 });
 await eng3.call('grove_plan_steps', { steps: [{ kind: 'research', title: 'Find the flaky tests' }, { kind: 'execute', title: 'File the issues' }] });
-assert.equal((await eng3.call('grove_submit', { step: 'S1', output: '## Flaky tests\n- a.test.ts (fails 1 run in 20 on CI)\n- b.test.ts (fails on Windows agents only)' })).ok, true);
+const flaky = `## Flaky tests\n- a.test.ts (fails 1 run in 20 on CI)\n- b.test.ts (fails on Windows agents only)\n\n## Logs\n${'é run 17: timeout after 30s\n'.repeat(900)}`;
+assert.ok(flaky.length > 20000);
+assert.equal((await eng3.call('grove_submit', { step: 'S1', output: flaky })).ok, true);
+assert.equal((await eng3.call('grove_update', { text: 'Filing the first issue.', next: 'File b.test.ts next.', effects: 'Filed #201 for a.test.ts.' })).ok, true);
 eng3.emit({ type: 'session.idle', data: {} });
 await eng3.proc.continueLead();
 assert.match(eng3.sent.at(-1), /^\[Grove\] T3 \(S2 Execute\): your step isn't finished\. Call grove_next for the assignment/, 'woken in its own chat');
@@ -563,6 +596,11 @@ res = await eng3b.call('grove_next');
 assert.match(res.data.guidance, /You took this task over from another engineer/);
 assert.deepEqual(res.data.results.map((x) => x.step), ['S1 · Research: Find the flaky tests']);
 assert.match(res.data.results[0].output, /a\.test\.ts/);
+assert.ok(res.data.results[0].output.length < flaky.length, 'the result is clipped');
+assert.equal(await fs.readFile(res.data.results[0].fullOutput, 'utf8'), flaky.trim(), 'and the full output is kept byte for byte');
+assert.deepEqual(res.data.handover.effects, ['Filed #201 for a.test.ts.'], 'the new engineer sees what the old one already did');
+assert.equal(res.data.handover.updates.at(-1).next, 'File b.test.ts next.');
+assert.match(res.data.guidance, /check whether it already happened/);
 await settle(eng3b);
 await eng3.proc.poll();
 assert.equal(eng3.proc.role, 'none', 'the old engineer steps aside');
@@ -602,7 +640,9 @@ assert.equal(await eng4.hooks.onAgentStop({}), undefined, 'a turn that said and 
 res = await eng4.call('grove_submit', { output: '## Answer\nNothing flaky this week.\n\n## How\nChecked the last 50 CI runs on main and the release branch.' });
 assert.equal(res.ok, true, res.data);
 assert.equal((await dispatch(eng4, res.data.hires[0], { fail: true })).failed, true);
-assert.match(sprite(eng4, 'grove-T4-reviewer-accuracy').error, /^Retrying \(attempt 2\) after: could not reach the session: host refused/, 'a failed hire shows even without a chat');
+assert.match(sprite(eng4, 'grove-T4-reviewer-accuracy').error, /^Reconnecting \(attempt 2 of 3\) after: could not reach the session: host refused/, 'a failed hire shows even without a chat');
+assert.equal((await eng4.call('grove_next')).data.hires.length, 0, 'offered again after a backoff');
+eng4.proc.engine.task('T4').tickets.at(-1).retryAt = Date.now() - 1;
 const acc4 = await dispatch(eng4, (await eng4.call('grove_next')).data.hires[0]);
 await sync(acc4.member, eng4);
 assert.equal(sprite(eng4, 'grove-T4-reviewer-accuracy').error, '', 'the retry started');

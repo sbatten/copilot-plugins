@@ -40,7 +40,8 @@ export function toastText(kind, task, out = {}) {
     }
     if (kind === 'merge') return `${name}: merge authorized; execution pending.`;
     if (kind === 'dismiss') return `${name} dismissed: the task is cancelled.`;
+    if (kind === 'retry') return `${name}: Grove is trying to reach its sessions again.`;
   }
-  const what = { complete: 'Your sign-off', merge: 'Your merge request', dismiss: 'Your dismissal' }[kind] ?? 'Your decision';
+  const what = { complete: 'Your sign-off', merge: 'Your merge request', dismiss: 'Your dismissal', retry: 'Your retry' }[kind] ?? 'Your decision';
   return `${name}: ${what} is recorded; its engineer applies it next.`;
 }

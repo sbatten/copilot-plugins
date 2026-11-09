@@ -33,11 +33,12 @@ import { promises as fs } from 'node:fs';
 import {
   ProcessEngine, ProcessError, MAX_ROUNDS, memberTitle, stepLabel, stageLabel, KIND_LABELS, STEP_KINDS, TEMPLATES, REVIEWER_FOCUS, LEAD,
   WAITING_STAGES, PAUSED_STAGES, SHIPPING_STAGES, DECISIONS, TASK_KINDS, KIND_SKILLS, STAGE_LABELS, SHELVABLE, prLine, currentStep, sessionErrorId,
+  REACH_LIMIT, CLAIM_TIMEOUT_MS, HEARTBEAT_TIMEOUT_MS,
 } from './engine.mjs';
 import { execFile } from 'node:child_process';
 import {
   briefFor, hireInstruction, engineerHandoff, engineerBrief, engineerContext, engineerWake, relayDelivery, DELIVERY_FALLBACK, stepAssignment, chiefNotice, chiefAnswer,
-  memberContext, LEAD_MARKER, MEMBER_MARKER, RELAY_MARKER, reportMessage, noticeMessage, decisionMessage, defang,
+  memberContext, memberContinuation, LEAD_MARKER, MEMBER_MARKER, RELAY_MARKER, reportMessage, noticeMessage, decisionMessage, defang,
 } from './prompts.mjs';
 import { validateEvidence } from './evidence.mjs';
 import { memberModel, engineerModel } from './models.mjs';
@@ -64,6 +65,7 @@ const PR_FIELDS = 'state,isDraft,mergeable,mergeStateStatus,reviewDecision,statu
 const DECISION_OUTCOMES = {
   question: 'asked', hold: 'on hold', resume: 'back to work', retry: 'back to work', merge: 'being merged', note: 'passed on',
   shelve: 'on the shelf', unshelve: 'back in the inbox', 'acknowledge-error': 'session error acknowledged',
+  'retry-recovery': 'retrying recovery',
 };
 // Decisions the engineer has nothing to do for: its Grove applies them from the board without waking it.
 const QUIET_DECISIONS = new Set(['shelve', 'unshelve', 'acknowledge-error']);
@@ -74,6 +76,7 @@ const ROUTE_SOURCES = new Set(['chief', 'self', 'member']);
 const RELAY_FINAL = new Set(['applied', 'rejected', 'superseded', 'delivered', 'unavailable', 'exhausted', 'not-needed']);
 const RELAY_MAX_DELAY_MS = 10 * 60 * 1000;
 const RELAY_MIN_ATTEMPTS = 3;
+const RETRY = Symbol('retry');
 const DECISION_REF = /^(T\d{1,6}):(\d{1,9})$/;
 // Errors shown to the human: one short line, with no link query strings.
 const relayError = (e) => clipText(String(e ?? '').replace(/(agent-host-session:\/\/[^\s?"']*)\?[^\s"']*/g, '$1').replace(/\s+/g, ' ').trim() || 'send failed', 160);
@@ -145,13 +148,15 @@ const POLL_MS = 1000;
 // How long to wait for an expected message before Grove wakes a session itself.
 const GRACE_MS = 45 * 1000;
 const SESSION_LINK = /agent-host-session:\/\/[^\s)"'\]]+/;
+// Each re-offer of an unreachable hire is a new thing for the engineer to do, so it gets its own wake budget.
+const hireWakeId = (k) => (k.reachedAt ? `${k.id}@${k.reachedAt}` : k.id);
 const isSessionLink = (v) => typeof v === 'string' && /^agent-host-session:\/\/[^\s]+$/.test(v);
 const LATEST_EVERY = 5;
 // create_session reports the new chat's own link, which carries a chat id.
 const CHAT_LINK = /agent-host-session:\/\/[^\s)"'\]]+[?&]chat=[A-Za-z0-9-]+/;
 const MAX_LEAD_WAKES = 3;
-const INBOX_WORDS = { approve: 'signed off', merge: 'asked to merge', cancel: 'dismissed', shelve: 'shelved', unshelve: 'took off the shelf' };
-const INBOX_ACTIONS = { complete: 'approve', merge: 'merge', dismiss: 'cancel', shelve: 'shelve', unshelve: 'unshelve' };
+const INBOX_WORDS = { approve: 'signed off', merge: 'asked to merge', cancel: 'dismissed', shelve: 'shelved', unshelve: 'took off the shelf', 'retry-recovery': 'asked Grove to retry recovering' };
+const INBOX_ACTIONS = { complete: 'approve', merge: 'merge', dismiss: 'cancel', shelve: 'shelve', unshelve: 'unshelve', retry: 'retry-recovery' };
 // The buttons the Grove inbox may send (the canvas server checks requests against this).
 export const INBOX_ACTION_NAMES = Object.freeze(Object.keys(INBOX_ACTIONS));
 export { TASK_COLORS };
@@ -201,11 +206,14 @@ function errorText(e) {
 }
 
 // A reviewer's error: its hire failed, its session is hitting errors, or a retry is waiting to start.
-function memberError(k) {
-  if (k.status === 'failed') return `Failed: ${k.failure ?? 'unknown error'}`;
+function memberError(k, t) {
+  const ep = t?.recovery?.[k.member];
+  if (k.status === 'failed') return ep?.exhaustedAt ? `Unrecoverable: ${k.failure}. The human can retry recovery.` : `Failed: ${k.failure ?? 'unknown error'}`;
   if (k.sessionError?.message) return errorText(k.sessionError);
-  if (k.previousFailure && (k.status === 'issued' || k.status === 'dispatched')) return `Retrying (attempt ${k.attempt}) after: ${k.previousFailure}`;
-  return '';
+  if (!k.previousFailure || (k.status !== 'issued' && k.status !== 'dispatched')) return '';
+  if (k.retryWhy === 'reach' && ep) return `Reconnecting (attempt ${ep.reach + 1} of ${REACH_LIMIT}) after: ${k.previousFailure}`;
+  if (k.retryWhy === 'replace') return `Replacing an unreachable session after: ${k.previousFailure}`;
+  return `Retrying (attempt ${k.attempt}) after: ${k.previousFailure}`;
 }
 
 // A call the preToolUse hook refused never ran; its completion says nothing about the ticket.
@@ -473,6 +481,7 @@ export class GroveProcess {
       await this.continueLead();
       return task;
     }
+    const previous = task.lead?.sessionId ?? null;
     try {
       this.engine.claim(taskId, token);
       if (board.meta.destinations?.[taskId]) task.destination = destination(board.meta.destinations[taskId]);
@@ -486,8 +495,9 @@ export class GroveProcess {
     await writeLeadLink(this.leadFile, { boardId, taskId });
     this.syncLeadRoute(this.engine.task(taskId));
     // An engineer taking over a task that's under way catches up from the board: grove_next includes the
-    // finished steps' results until it submits something.
-    this.catchUp = this.engine.task(taskId).steps.some((x) => x.status === 'done' && x.output);
+    // finished steps' results and the previous engineer's hand-over notes until it submits something.
+    const claimed = this.engine.task(taskId);
+    this.catchUp = claimed.steps.some((x) => x.status === 'done' && x.output) || (!!previous && previous !== this.selfId) || claimed.updates.length > 0;
     await this.collectResults();
     await this.applyLeadDecisions({ wake: false });
     this.observeSession();
@@ -550,7 +560,21 @@ export class GroveProcess {
       && IN_FLIGHT.has(found.ticket.status) && prior?.status !== 'done' && prior?.status !== 'failed';
     this.work = { ...link, submissionVersion: link.submissionVersion ?? found?.ticket.version, resolved: !open, lastBeat: 0 };
     if (!open) return;
-    await this.finishWork('failed', { error: 'Reviewer session restarted before submitting; the engineer can retry or replace it using native session tools.' });
+    // A restart (often a host refresh) interrupts the turn, not the assignment: keep the ticket and ask this
+    // same chat, which still has the brief and its findings, to continue.
+    this.work.interrupted = 'this chat restarted';
+    await this.beat(true);
+  }
+
+  // Wake an interrupted reviewer once it is idle; skipped if it finished or its ticket went away meanwhile.
+  async continueMember() {
+    const w = this.work;
+    if (!w?.interrupted || w.resolved || this.busy) return;
+    const found = this.currentWork();
+    if (!found) return;
+    const why = w.interrupted;
+    delete w.interrupted;
+    await this.wake(memberContinuation(found.task, found.ticket, why));
   }
 
   currentWork() {
@@ -731,7 +755,10 @@ export class GroveProcess {
       await this.flushOutbox();
       if (this.role === 'none' && this.polls % LATEST_EVERY === 0) await this.viewLatest();
       if (!this.board) return;
-      if (this.role === 'member') await this.beat();
+      if (this.role === 'member') {
+        await this.beat();
+        await this.continueMember();
+      }
       if (this.role === 'lead') {
         this.engine.sweep();
         await this.watchPr();
@@ -818,7 +845,7 @@ export class GroveProcess {
     const sends = [];
     // Fallback: the engineer normally messages this chat; if it hasn't within the grace period, wake ourselves.
     const now = Date.now();
-    for (const item of this.engine.humanActions()) {
+    for (const item of this.humanActions()) {
       const key = noticeKey(this.engine.task(item.taskId));
       if (!key || wasNotified(notified[item.taskId], key)) continue;
       const id = `notice:${item.taskId}:${key}`;
@@ -849,17 +876,17 @@ export class GroveProcess {
         sends.push({ id: null, text: `[Grove → Chief of Staff] ${taskLabel(t)} "${t.title}": ${prLine(t.ship.pr)} is merged, so the task is done. Tell the human in one line (link the PR: ${t.ship.pr.url}) and end your turn.` });
       }
     }
-    for (const t of this.engine.activeTasks()) {
-      if (!t.stalled) continue;
-      const key = `stalled:${t.stalled.at}`;
-      if (LEAD_IDLE.has(t.stage)) continue;
-      this.board.meta.stalledNotified ??= {};
-      if (this.board.meta.stalledNotified[t.id] === key) continue;
-      this.board.meta.stalledNotified[t.id] = key;
-      sends.push({ id: null, stalled: t.id, text: `[Grove → Chief of Staff] ${taskLabel(t)} "${t.title}" has stalled: its engineer stopped responding. Report this once. Only recover or replace its engineer if the human explicitly requests it.` });
+    // An engineer that can't be reached is nudged, then replaced; a task Grove gave up on is told once.
+    let relayChanged = await this.recoverLeads(sends);
+    this.board.meta.recoveryNotified ??= {};
+    for (const item of this.humanActions().filter((h) => h.kind === 'unrecoverable')) {
+      const key = `unrecoverable-${item.since}`;
+      if (this.board.meta.recoveryNotified[item.taskId] === key) continue;
+      this.board.meta.recoveryNotified[item.taskId] = key;
+      sends.push({ id: null, recovery: item.taskId, text: `[Grove → Chief of Staff] ${item.text} Tell the human once, in one line: they can retry recovery from the Grove inbox (or ask you; then record "retry-recovery"), shelve it, or dismiss it. Don't retry or replace anything yourself. End your turn.` });
     }
     // Notification is bounded and cannot delay or undo a human transition.
-    const relayChanged = await this.advanceRelays(sends);
+    relayChanged = (await this.advanceRelays(sends)) || relayChanged;
     if (!sends.length) {
       if (relayChanged) {
         await this.board.saveMeta();
@@ -871,7 +898,14 @@ export class GroveProcess {
     for (const s of sends) {
       if (await this.wake(s.text, { retry: false })) continue;
       if (s.id) delete notified[s.id];
-      if (s.stalled) delete this.board.meta.stalledNotified[s.stalled];
+      if (s.recovery) delete this.board.meta.recoveryNotified[s.recovery];
+      // The Chief never saw it, so the attempt doesn't count: offer it again on the next poll.
+      const ep = s.lead && this.board.meta.leadRecovery?.[s.lead];
+      if (ep) {
+        if (s.replace) Object.assign(ep, { replaced: 0, reach: REACH_LIMIT });
+        else ep.reach = Math.max(0, ep.reach - 1);
+        ep.nextAt = 0;
+      }
       const relay = s.relay && this.board.meta.decisionRelays?.[s.relay];
       if (relay) {
         relay.wakeFailures = (relay.wakeFailures ?? 0) + 1;
@@ -884,6 +918,98 @@ export class GroveProcess {
     }
     await this.board.saveMeta();
     if (relayChanged) this.onChange();
+  }
+
+  // Chief: engineers Grove can't reach. One whose Grove stopped reporting while it has work due, or that
+  // ignored Grove's own wakes, is nudged in its chat REACH_LIMIT times; then the Chief replaces it once (same
+  // task and checkout) without asking the human; if that one doesn't start or answer either, the task is
+  // unrecoverable until the human retries. The episode ends as soon as the engineer answers.
+  async recoverLeads(sends) {
+    const meta = this.board.meta;
+    meta.leadRecovery ??= {};
+    const now = this.now();
+    let changed = false;
+    for (const t of this.engine.state.tasks) {
+      const ep = meta.leadRecovery[t.id];
+      if (TERMINAL.has(t.stage) || t.stage === 'shelved' || PAUSED_STAGES.has(t.stage)) {
+        if (ep) {
+          delete meta.leadRecovery[t.id];
+          changed = true;
+        }
+        continue;
+      }
+      const route = this.leadRoute(t);
+      const pending = route.handoffPending && ep?.replaced;
+      const why = pending ? 'its replacement has not started' : route.handoffPending ? null : await this.leadUnreachable(t);
+      if (!why) {
+        if (ep) {
+          delete meta.leadRecovery[t.id];
+          changed = true;
+          this.log(`Grove: ${t.id}'s engineer is reachable again.`, 'info');
+        }
+        continue;
+      }
+      if (ep?.exhaustedAt) continue;
+      const e = ep ?? (meta.leadRecovery[t.id] = { since: now, reason: why, reach: 0, replaced: 0, exhaustedAt: null, nextAt: now });
+      e.reason = why;
+      changed = changed || !ep;
+      if (now < (e.nextAt ?? 0)) continue;
+      const label = `${taskLabel(t)} "${t.title}"`;
+      if (e.reach < REACH_LIMIT) {
+        e.reach += 1;
+        changed = true;
+        if (pending) {
+          e.nextAt = now + CLAIM_TIMEOUT_MS;
+          sends.push({ id: null, lead: t.id, text: `[Grove → Chief of Staff] ${label}: ${why} (attempt ${e.reach}/${REACH_LIMIT}). Without asking the human, call grove_handoff with taskId "${t.id}" for a fresh hand-off and start the new engineer exactly as its guidance says. End your turn.` });
+          continue;
+        }
+        e.nextAt = now + this.relayDelay(e.reach);
+        if (route.link) {
+          sends.push({ id: null, lead: t.id, text: `[Grove → Chief of Staff] ${label}: its engineer isn't responding (${why}). Reach attempt ${e.reach}/${REACH_LIMIT}: send_message with session: ${route.link}, delivery: steer, message: [Grove] ${t.id}: Grove can't tell whether you're still working on this task. Call grove_next now and carry on from where you stopped.\n${DELIVERY_FALLBACK} Don't ask the human or replace the engineer: Grove tells you if that's needed. End your turn.` });
+        }
+        continue;
+      }
+      if (!e.replaced) {
+        Object.assign(e, { replaced: 1, reach: 0, since: now, nextAt: now + CLAIM_TIMEOUT_MS });
+        changed = true;
+        sends.push({ id: null, lead: t.id, replace: true, text: `[Grove → Chief of Staff] ${label}: its engineer could not be reached after ${REACH_LIMIT} attempts (${why}). Replace it now, without asking the human: call grove_handoff with taskId "${t.id}", send any messages it returns, then start the new engineer exactly as its guidance says. It continues the same task in the same checkout. Mention the replacement in your next status to the human. End your turn.` });
+        continue;
+      }
+      e.exhaustedAt = now;
+      changed = true;
+      this.log(`Grove: ${t.id}'s engineer is unrecoverable (${why}); waiting for the human.`, 'warning');
+    }
+    return changed;
+  }
+
+  // Why the task's engineer looks unreachable, or null. Its Grove reports every poll while its chat is loaded,
+  // so silence alone only matters when the engineer has something to do.
+  async leadUnreachable(t) {
+    if (!t.lead || LEAD_IDLE.has(t.stage)) return null;
+    if (t.stalled) return 'it stopped answering Grove\'s wakes';
+    if (this.now() - (t.lead.observedAt ?? t.lead.claimedAt ?? 0) <= HEARTBEAT_TIMEOUT_MS) return null;
+    if (t.stage === 'working' || t.stage === 'routing' || this.engine.issuedTickets([t], LEAD).length || this.engine.openQuestion(t)) return 'its chat stopped reporting while it had work to do';
+    for (const k of t.tickets) {
+      if (k.status !== 'dispatched' && k.status !== 'running') continue;
+      const r = await this.board.readResult(k.id).catch(() => null);
+      if (r?.token === k.token && (r.status === 'done' || r.status === 'failed')) return 'its chat stopped reporting while reviews waited for it';
+    }
+    return null;
+  }
+
+  // Who Grove is trying to reach on a task, for status: { member: 'reconnecting 2/3 (why)' | 'unrecoverable (why)' }.
+  recoveryView(t) {
+    const eps = { ...(t.recovery ?? {}), ...(this.board?.meta?.leadRecovery?.[t.id] ? { lead: this.board.meta.leadRecovery[t.id] } : {}) };
+    const out = {};
+    for (const [key, ep] of Object.entries(eps)) {
+      const who = key === 'lead' ? 'engineer' : t.members?.[key]?.title ?? key;
+      out[who] = ep.exhaustedAt ? `unrecoverable (${ep.reason})` : `${ep.replaced ? 'replacement ' : ''}reconnecting ${ep.reach}/${REACH_LIMIT} (${ep.reason})`;
+    }
+    return Object.keys(out).length ? out : null;
+  }
+
+  humanActions(tasks = this.engine.state.tasks) {
+    return this.engine.humanActions(tasks, { leadRecovery: this.board?.meta?.leadRecovery ?? {} });
   }
 
   // Chief: move each decision relay along. Returns whether any changed; adds messages for the Chief to `sends`.
@@ -928,7 +1054,7 @@ export class GroveProcess {
       set(relay, 'relay-requested', { nextAt: now + this.relayDelay(relay.requests) });
       const words = INBOX_WORDS[relay.action] ? `${INBOX_WORDS[relay.action]}` : `decided "${relay.action}" for`;
       const delivery = relayDelivery('decision', item.action);
-      sends.push({ id: null, relay: taskId, text: `[Grove] The human ${words} ${taskLabel(t)} "${t.title}". The decision is already applied. Optional notification (${relay.requests}/${RELAY_MIN_ATTEMPTS}): send_message with session: ${route.link}, delivery: ${delivery}, message: ${decisionMessage(this.board.id, t, item)}\n${delivery === 'steer' ? `${DELIVERY_FALLBACK} ` : ''}Do not recover or replace an engineer for notification failure. End your turn.` });
+      sends.push({ id: null, relay: taskId, text: `[Grove] The human ${words} ${taskLabel(t)} "${t.title}". The decision is already applied. Optional notification (${relay.requests}/${RELAY_MIN_ATTEMPTS}): send_message with session: ${route.link}, delivery: ${delivery}, message: ${decisionMessage(this.board.id, t, item)}\n${delivery === 'steer' ? `${DELIVERY_FALLBACK} ` : ''}Don't replace the engineer because a notification failed: Grove tells you if it can't be reached. End your turn.` });
     }
     return changed;
   }
@@ -1004,8 +1130,8 @@ export class GroveProcess {
         relay.state = 'delivered';
         delete relay.lastError;
       } else {
-        relay.state = /unknown chat owner|session not found/i.test(outcome.reason ?? '') ? 'unavailable'
-          : relay.attempts >= RELAY_MIN_ATTEMPTS ? 'exhausted' : 'delivery-failed';
+        // An unknown owner or missing session is often a chat the host hasn't loaded yet: retry within the budget.
+        relay.state = relay.attempts >= RELAY_MIN_ATTEMPTS ? 'exhausted' : 'delivery-failed';
         relay.lastError = outcome.reason;
       }
       relay.nextAt = this.now() + this.relayDelay(relay.attempts);
@@ -1089,7 +1215,7 @@ export class GroveProcess {
   async leadPending(task) {
     const step = currentStep(task);
     const work = step?.status === 'working' && task.stage === 'working' ? [{ id: `work:${step.id}:${step.startedAt ?? 0}`, kind: 'work' }] : [];
-    const hires = this.engine.issuedTickets([task], LEAD).map((x) => ({ id: x.ticket.id, kind: 'hire' }));
+    const hires = this.engine.issuedTickets([task], LEAD).map((x) => ({ id: hireWakeId(x.ticket), kind: 'hire' }));
     const msgs = (await this.leadMessages(task)).map((m) => ({ id: m.id, kind: 'message' }));
     // Choosing the next steps (or delivering) is the engineer's job whenever nothing is in progress.
     const decide = task.stage === 'routing' ? [{ id: `route:${task.routingSince ?? 0}`, kind: 'decide' }] : [];
@@ -1103,8 +1229,9 @@ export class GroveProcess {
   unavailableReviewers(task) {
     const step = currentStep(task);
     if (task.stage !== 'reviewing' || !step) return [];
+    // An exhausted recovery waits for the human's "retry recovery"; the engineer isn't asked to replace it again.
     return step.reviewers.map((r) => task.tickets.findLast((k) => k.step === step.id && k.round === step.forum.round && k.specialty === r.name))
-      .filter((k) => k?.status === 'failed');
+      .filter((k) => k?.status === 'failed' && !task.recovery?.[k.member]?.exhaustedAt);
   }
 
   noteWake(ticketId) {
@@ -1512,7 +1639,7 @@ export class GroveProcess {
         await this.board.saveMeta();
         return chiefAnswer(t, q);
       }
-      const item = t && this.engine.humanActions([t])[0];
+      const item = t && this.humanActions([t])[0];
       if (!item || noticeKey(t) !== key) return `Grove: ${taskId} no longer needs the human for this. Check grove_status if unsure, and tell the human in one line.`;
       this.board.meta.notified[taskId] = key;
       await this.board.saveMeta();
@@ -1544,6 +1671,7 @@ export class GroveProcess {
   }
 
   async onHirePrompt([, boardId, ticketId, token]) {
+    const again = this.role === 'member' && this.work?.ticketId === ticketId && this.work.token === token && !this.work.resolved;
     let found;
     try {
       found = await this.bindMember({ boardId, ticketId, token });
@@ -1552,6 +1680,7 @@ export class GroveProcess {
       throw err;
     }
     const { task, ticket } = found;
+    if (again) return { modifiedPrompt: memberContinuation(task, ticket, 'the engineer re-sent it because this chat had stopped answering'), additionalContext: memberContext(task, ticket) };
     const brief = briefFor(task, ticket);
     return { modifiedPrompt: brief, additionalContext: memberContext(task, ticket) };
   }
@@ -1600,8 +1729,27 @@ export class GroveProcess {
           const t = findTask(this.engine.state.tasks, args.taskId);
           if (t) args = { ...args, taskId: t.id };
         }
-        const result = await fn(args ?? {});
-        await this.board?.flush();
+        const run = async () => {
+          const saved = this.board?.savedTasks ?? 0;
+          try {
+            const result = await fn(args ?? {});
+            await this.board?.flush();
+            return result;
+          } catch (err) {
+            if (err?.code !== 'stale_task' || !this.engine) throw err;
+            // A background save (relay, poll) raced this call. Reload; repeat the call only if none of its
+            // own task saves landed, otherwise report the conflict so the agent inspects state first.
+            await this.engine.refresh();
+            if ((this.board?.savedTasks ?? 0) === saved) return RETRY;
+            throw new ProcessError('conflict', `${err.task ?? 'A task'} changed while this call ran and Grove reloaded it. Part of this call may already be recorded: check grove_next or grove_status before repeating it.`);
+          }
+        };
+        let result = await run();
+        if (result === RETRY) {
+          this.log('Grove retried a tool call once after reloading a concurrently changed task.', 'info');
+          result = await run();
+          if (result === RETRY) throw new ProcessError('conflict', 'The board kept changing during this call. Check grove_next or grove_status, then try again.');
+        }
         return { textResultForLlm: text(result), resultType: 'success' };
       } catch (err) {
         if (err instanceof ProcessError || err instanceof BoardError || err instanceof PlacementError) return { textResultForLlm: `Grove: ${err.message}`, resultType: 'failure' };
@@ -1732,8 +1880,9 @@ export class GroveProcess {
 - hold / resume: stop everyone on the task / pick up where it stopped.
 - retry: they fixed what a blocked task needed.
 - merge: merge the task's PR.
-- shelve: set a task that's waiting on them aside for later ("not now", "park it", "I'll come back to it"). It leaves their inbox, the engineer rests, and everything is kept.
+- shelve: set a task that's waiting on them (or unrecoverable) aside for later ("not now", "park it", "I'll come back to it"). It leaves their inbox, the engineer rests, and everything is kept.
 - unshelve: put a shelved task back in their inbox. (A work direction such as "changes" takes it off the shelf by itself; acknowledging an error does not.)
+- retry-recovery: Grove gave up reaching a reviewer or engineer (it says the task is unrecoverable) and the human wants it to try again. Grove starts a fresh recovery; you replace nothing yourself.
 - acknowledge-error: acknowledge only the engineer session error identified by errorId from grove_status. Keeps stage, shelf and history intact, without waking anyone. Does not dismiss tracking, PR or blocker failures.
 - cancel: drop the task.`,
         parameters: {
@@ -1934,10 +2083,18 @@ export class GroveProcess {
       {
         name: 'grove_update',
         description: 'Engineer: post a progress update on the task\'s status board (shown in the grove, the task view and the report). Use it instead of messaging the Chief of Staff: the Chief only hears what the human must act on.',
-        parameters: { type: 'object', properties: { text: { type: 'string', description: 'What happened or changed, in a sentence or two.' } }, required: ['text'] },
-        handler: guarded(LEAD, async ({ text: msg }) => {
+        parameters: {
+          type: 'object',
+          properties: {
+            text: { type: 'string', description: 'What happened or changed, in a sentence or two.' },
+            next: { type: 'string', description: 'Optional: what you mean to do next, so another engineer could pick up from here.' },
+            effects: { type: 'string', description: 'Optional: changes outside Grove that are done or under way (e.g. "pushed branch fix/x", "gh pr create running"), so whoever continues checks them instead of repeating them.' },
+          },
+          required: ['text'],
+        },
+        handler: guarded(LEAD, async ({ text: msg, next, effects }) => {
           if (typeof msg !== 'string') throw new ProcessError('invalid_input', 'text is required.');
-          this.engine.postUpdate(this.leadTaskId, msg);
+          this.engine.postUpdate(this.leadTaskId, msg, { next: typeof next === 'string' ? next : '', effects: typeof effects === 'string' ? effects : '' });
           await this.board.flush();
           return { posted: true, guidance: 'Posted. Carry on (or end your turn if nothing else is waiting).' };
         }),
@@ -2067,7 +2224,7 @@ export class GroveProcess {
     const before = t.stage;
     const note = {
       approve: before === 'escalated' ? 'Accepted as is from the Grove inbox.' : 'Signed off from the Grove inbox.', merge: 'Merge requested from the Grove inbox.',
-      cancel: 'Dismissed from the Grove inbox.', shelve: '', unshelve: '',
+      cancel: 'Dismissed from the Grove inbox.', shelve: '', unshelve: '', 'retry-recovery': 'Retry recovery from the Grove inbox.',
     }[decision];
     const expectedStages = decision === 'approve' ? ['awaiting-approval', 'escalated'] : decision === 'merge' ? ['ready-to-merge'] : null;
     const out = await this.recordDecision(taskId, decision, note, { via: 'grove', expectedStages });
@@ -2108,10 +2265,10 @@ export class GroveProcess {
     for (const id of ids) {
       const t = tasks.find((x) => x.id === id);
       if (!t) continue;
-      const human = this.engine.humanActions([t])[0];
+      const human = this.humanActions([t])[0];
       const lines = [`### ${taskLabel(t)} "${t.title}" (${stageLabel(t)})`];
       if (human) {
-        const what = { 'approve-result': 'sign-off on the delivered result', 'resolve-escalation': `input on an escalated step (${human.step})`, unblock: `them to unblock it: ${human.need}`, merge: `their go-ahead to merge ${prLine(human.pr)}` }[human.kind];
+        const what = { 'approve-result': 'sign-off on the delivered result', 'resolve-escalation': `input on an escalated step (${human.step})`, unblock: `them to unblock it: ${human.need}`, merge: `their go-ahead to merge ${prLine(human.pr)}`, unrecoverable: `a choice: Grove could not reach its ${human.role} and stopped retrying (${human.reason})` }[human.kind];
         lines.push(`Waiting on the human: ${what}.`);
       }
       if (t.pause?.kind === 'hold') lines.push('It is on hold; "resume" picks it up where it stopped.');
@@ -2127,6 +2284,7 @@ export class GroveProcess {
       if (TERMINAL.has(t.stage)) lines.push('This task has already finished; tell the human, and start a new task if they want more.');
       else if (t.stage === 'shelved') lines.push('Their message is probably about picking it up again. Record their answer as usual and it comes off the shelf: "approve", "changes" with their words (for example to run it again with new data: the same engineer redoes it in its own chat), "merge", "retry", "question" or "note". To just put it back in their inbox, record "unshelve"; to drop it, "cancel". Then send any returned message to the engineer.');
       else if (human?.kind === 'unblock') lines.push('If they say it\'s fixed, record "retry" with their words; otherwise answer them, or record "cancel" or "hold". Then send the returned message to the engineer.');
+      else if (human?.kind === 'unrecoverable') lines.push('If they want Grove to try again, record "retry-recovery"; to set it aside, "shelve"; to drop it, "cancel". Don\'t replace sessions yourself.');
       else if (human?.kind === 'merge') lines.push('If they want it merged, record "merge"; "changes" with their words if they want more; then send the returned message to the engineer.');
       else if (human) lines.push(`Treat the message as the human's answer: record it with grove_record_decision ("approve", "changes" with their words, "shelve" if they want to come back to it later, or "cancel"), then send any returned message to the engineer.`);
       else lines.push('It is still in progress. If they ask how it is going, answer from grove_status and the latest updates without recording anything. If they ask something the engineer must answer, record "question"; to steer the work, "note"; to stop or restart everyone, "hold" or "resume"; to drop it, "cancel". Then send the returned message to the engineer.');
@@ -2156,15 +2314,16 @@ export class GroveProcess {
       })),
       items: human.map((h) => {
         const t = this.engine.state.tasks.find((x) => x.id === h.taskId);
-        const kind = { 'approve-result': 'sign-off', 'resolve-escalation': 'input', unblock: 'blocked', merge: 'merge' }[h.kind] ?? 'input';
+        const kind = { 'approve-result': 'sign-off', 'resolve-escalation': 'input', unblock: 'blocked', merge: 'merge', unrecoverable: 'unrecoverable' }[h.kind] ?? 'input';
         const label = {
+          unrecoverable: `Unrecoverable · ${h.role} unreachable`,
           'sign-off': t?.ship?.pr && t.ship.phase === 'draft' ? `Ready for sign-off · draft PR #${t.ship.pr.number}` : t?.delivery?.ship ? 'Ready for sign-off · then a PR' : 'Ready for sign-off',
           input: `Needs your input · ${h.step}`,
           blocked: `Blocked on you${h.by ? ` · ${h.by}` : ''}`,
           merge: `Ready to merge · PR #${h.pr?.number}`,
         }[kind];
-        const summary = { 'sign-off': h.summary, input: t?.escalation?.reason ?? h.text, blocked: h.need, merge: prLine(h.pr) }[kind];
-        const since = { 'sign-off': t?.delivery?.at, input: t?.escalation?.at, blocked: t?.pause?.at, merge: t?.ship?.readyAt }[kind];
+        const summary = { 'sign-off': h.summary, input: t?.escalation?.reason ?? h.text, blocked: h.need, merge: prLine(h.pr), unrecoverable: `${h.reason}. Grove tried the same session ${REACH_LIMIT} times, then a replacement, and stopped. The checkout, the latest submission and the reviews so far are kept.` }[kind];
+        const since = { 'sign-off': t?.delivery?.at, input: t?.escalation?.at, blocked: t?.pause?.at, merge: t?.ship?.readyAt, unrecoverable: h.since }[kind];
         return {
           taskId: h.taskId,
           name: h.name ?? null,
@@ -2188,11 +2347,14 @@ export class GroveProcess {
     await this.checkChief();
     await this.engine.refresh();
     let before;
-    const { task: t, item, duplicate } = await this.board.decide(id, { action: decision, note, via, ship, errorId }, (current, items, input) => {
+    // An engineer the Chief gave up on is recorded in the meta, not the task: the decision carries it.
+    const leadLost = !!this.board.meta.leadRecovery?.[id]?.exhaustedAt;
+    const input0 = { action: decision, note, via, ship, errorId, ...(leadLost && ['retry-recovery', 'shelve'].includes(decision) ? { unrecoverable: true } : {}) };
+    const { task: t, item, duplicate } = await this.board.decide(id, input0, (current, items, input) => {
       before = current.stage;
       const err = expectedStages && !expectedStages.includes(current.stage)
         ? `${id} isn't ready for this inbox action.`
-        : this.engine.decisionError(current, decision, note, { ship, errorId });
+        : this.engine.decisionError(current, decision, note, { ship, errorId, unrecoverable: input.unrecoverable });
       const last = items.at(-1);
       if (err && last?.action === decision && (decision === 'cancel' && current.stage === 'cancelled'
         || via === 'grove' && last.via === via && (last.note ?? '') === (note ?? '') && last.ship === ship)) {
@@ -2217,6 +2379,9 @@ export class GroveProcess {
           : !owned && !QUIET_DECISIONS.has(decision) && !route.link ? 'unavailable' : 'not-needed');
         delete meta.notified[id];
         if (meta.stalledNotified) delete meta.stalledNotified[id];
+        // Retrying recovery gives the engineer a fresh budget (and a replacement, if it still can't be reached).
+        if (decision === 'retry-recovery' && meta.leadRecovery?.[id]?.exhaustedAt) delete meta.leadRecovery[id];
+        if (decision === 'retry-recovery' && meta.recoveryNotified) delete meta.recoveryNotified[id];
       });
       this.onChange();
     }
@@ -2258,7 +2423,7 @@ export class GroveProcess {
       await this.writeTaskReport(task);
     }
     const issued = this.engine.issuedTickets([task], LEAD);
-    for (const { ticket } of issued) if (!this.wokenFor.has(ticket.id)) this.noteWake(ticket.id);
+    for (const { ticket } of issued) if (!this.wokenFor.has(hireWakeId(ticket))) this.noteWake(hireWakeId(ticket));
     const messages = await this.leadMessages(task);
     for (const m of messages) if (!this.wokenFor.has(m.id)) this.noteWake(m.id);
     if (task.stalled) {
@@ -2275,6 +2440,7 @@ export class GroveProcess {
     const question = this.engine.openQuestion(task);
     const waitingHires = task.tickets.filter((k) => k.status === 'issued' && k.retryAt > Date.now());
     const unavailable = this.unavailableReviewers(task);
+    const unrecoverable = Object.entries(task.recovery ?? {}).filter(([, ep]) => ep.exhaustedAt);
     if (TERMINAL.has(task.stage)) guidance = `${task.id} is ${stageLabel(task)}. Nothing more to do here.`;
     else if (task.stage === 'shelved') guidance = `${task.id} is on the shelf: the human set it aside for later. Do nothing more: end your turn. When they pick it up again, the Chief of Staff messages this chat (or Grove wakes it).`;
     else if (task.stage === 'on-hold') guidance = `${task.id} is on hold: the human stopped the work${task.pause?.note ? ` ("${defang(task.pause.note)}")` : ''}. Do nothing more: end your turn. The Chief of Staff messages this chat when the human resumes it.`;
@@ -2285,7 +2451,7 @@ export class GroveProcess {
       guidance = `Work on ${working.id} now, in this chat: follow the assignment below, then submit with grove_submit.`;
       if (this.catchUp) {
         results = this.resultsFor(task);
-        guidance += ' You took this task over from another engineer: the finished steps\' results are below, and the work so far is in the workspace.';
+        guidance += ' You took this task over from another engineer: the finished steps\' results and its hand-over notes ("handover") are below, and the work so far is in the workspace. Before repeating anything listed under handover "effects" (a push, a PR, a comment), check whether it already happened.';
       }
     }
     else if (task.stage === 'routing') {
@@ -2294,10 +2460,16 @@ export class GroveProcess {
     }
     else if (question) guidance = `The human asked: "${defang(question.text)}". Answer it with grove_answer (find out what you need first), then send the message it returns to the Chief of Staff.${inFlight.length ? ' Your reviewers are still working; they report back to this chat.' : ''}`;
     else if (unavailable.length) guidance = `Recover inaccessible reviewers yourself: ${unavailable.map((k) => k.specialty).join(', ')}. Call grove_recover with reviewer and note, then create the returned replacement sessions. Existing findings stay in the report.`;
+    else if (unrecoverable.length && !inFlight.length) guidance = `${unrecoverable.map(([key]) => task.members[key]?.title ?? key).join(', ')} could not be reached, even after a replacement, so Grove stopped retrying and the human has been told. End your turn; Grove wakes you when the human retries recovery.`;
     else if (inFlight.length) guidance = `${step ? `${step.id} is` : 'The work is'} with its reviewers in their own chats. End your turn; they report back to this chat.`;
     else if (SHIPPING_STAGES.has(task.stage)) guidance = `${task.id} is shipping: Grove is watching ${prLine(task.ship.pr)} and wakes you if checks fail, a reviewer asks for changes, or the human needs to decide. End your turn.`;
     else if (WAITING.has(task.stage)) guidance = `${task.id} is waiting on the human (${stageLabel(task)}), and the Chief of Staff has been told. Write a two-line summary and end your turn; the Chief messages this chat when the human decides.`;
-    else if (waitingHires.length) guidance = `Hires ${waitingHires.map((k) => k.id).join(', ')} wait until the host's message limit resets (about ${new Date(Math.max(...waitingHires.map((k) => k.retryAt))).toISOString().slice(11, 16)} UTC). End your turn; Grove offers them again then.`;
+    else if (waitingHires.length) {
+      const until = new Date(Math.max(...waitingHires.map((k) => k.retryAt))).toISOString().slice(11, 19);
+      guidance = waitingHires.every((k) => k.retryWhy === 'rate-limit')
+        ? `Hires ${waitingHires.map((k) => k.id).join(', ')} wait until the host's message limit resets (about ${until.slice(0, 5)} UTC). End your turn; Grove offers them again then.`
+        : `Hires ${waitingHires.map((k) => k.id).join(', ')} could not reach their sessions; Grove offers them again shortly (by about ${until} UTC). End your turn; Grove wakes you then.`;
+    }
     else guidance = 'Nothing to do right now.';
     if (question && !guidance.startsWith('The human asked')) guidance += ` The human also asked: "${defang(question.text)}". Answer it with grove_answer once you can.`;
     // Grove can't reach this chat: no confirmed link (never learned, or an unverifiable one was dropped).
@@ -2328,6 +2500,7 @@ export class GroveProcess {
     const out = { task: task.id, stage: stageLabel(task), guidance, ...(work ? { work } : {}),
       ...(task.destination ? { destination: task.destination, directory: task.directory ?? null } : {}),
       hires, messages: messages.map(({ id, ...m }) => m), inFlight, steps: this.stepsSummary(task), ...(results ? { results } : {}),
+      ...(this.catchUp && this.handover(task) ? { handover: this.handover(task) } : {}),
       ...(live ? { decisions, reviews } : {}),
       ...(decisionsError && live ? { decisionsUnavailable: decisionsError } : {}),
       ...(unreadable.length ? { reviewsIncomplete: unreadable.map((r) => ({ ticket: r.ticket, error: r.error })) } : {}) };
@@ -2435,6 +2608,17 @@ export class GroveProcess {
     return 'All planned steps are done; the results are below. If they answer the task, call grove_deliver with a short summary for the human (what was found or done, and anything to watch out for). If not, add or redo steps with grove_plan_steps.';
   }
 
+  // What a replacement engineer needs beyond the board's steps: the last progress notes (with what the previous
+  // engineer meant to do next and what it changed outside Grove) and the step's latest submission, in full.
+  handover(task) {
+    const updates = (task.updates ?? []).slice(-5).map((u) => ({ at: new Date(u.at).toISOString(), text: u.text, ...(u.next ? { next: u.next } : {}), ...(u.effects ? { effects: u.effects } : {}) }));
+    const effects = updates.filter((u) => u.effects).map((u) => u.effects);
+    const step = currentStep(task);
+    const submitted = step?.outputRef?.path ? { step: step.id, version: step.version, fullOutput: step.outputRef.path } : null;
+    if (!updates.length && !submitted) return null;
+    return { updates, ...(effects.length ? { effects } : {}), ...(submitted ? { submitted } : {}) };
+  }
+
   // Outputs of finished steps, newest in full, for the engineer to judge and summarise.
   resultsFor(task) {
     const done = task.steps.filter((s) => s.status === 'done' && s.output && !s.ship);
@@ -2444,6 +2628,7 @@ export class GroveProcess {
       reviewed: s.reviewers.length ? s.reviewers.map((r) => r.name) : [],
       ...(s.verification ? { verification: s.verification.result, evidence: s.verification.items.length } : {}),
       output: i === done.length - 1 ? clipText(s.output, 12000) : clipText(s.output, 2500),
+      ...(s.outputRef?.path && s.outputRef.chars > (i === done.length - 1 ? 12000 : 2500) ? { fullOutput: s.outputRef.path } : {}),
     }));
   }
 
@@ -2491,15 +2676,16 @@ export class GroveProcess {
         steps: this.stepsSummary(t),
         delivery: t.delivery ? { summary: t.delivery.summary, ship: !!t.delivery.ship } : null,
         escalation: t.escalation,
+        ...(this.recoveryView(t) ? { recovery: this.recoveryView(t) } : {}),
         ...(t.shelf ? { shelved: { from: STAGE_LABELS[t.shelf.from] ?? t.shelf.from, since: new Date(t.shelf.at).toISOString() } } : {}),
         ...(t.pause ? { paused: { kind: t.pause.kind, need: t.pause.need ?? null, by: t.pause.by ?? null, since: new Date(t.pause.at).toISOString() } } : {}),
         ...(t.ship ? { shipping: { phase: t.ship.phase, pr: t.ship.pr ? { url: t.ship.pr.url, status: prLine(t.ship.pr), error: t.ship.pr.error ?? null } : null, needsWork: t.ship.attention?.problems ?? null } } : {}),
         updates: (t.updates ?? []).slice(-5).map((u) => ({ at: new Date(u.at).toISOString(), text: u.text })),
         ...(t.questions?.length ? { questions: t.questions.slice(-3).map((q) => ({ asked: q.text, answer: q.answer ?? '(not answered yet)' })) } : {}),
-        tickets: t.tickets.filter((k) => k.status !== 'cancelled').slice(-10).map((k) => ({ id: k.id, reviewer: memberTitle(k), status: k.status, failure: k.failure, ...(memberError(k) && k.status !== 'failed' ? { error: memberError(k) } : {}) })),
+        tickets: t.tickets.filter((k) => k.status !== 'cancelled').slice(-10).map((k) => ({ id: k.id, reviewer: memberTitle(k), status: k.status, failure: k.failure, ...(memberError(k, t) && k.status !== 'failed' ? { error: memberError(k, t) } : {}) })),
         recent: t.history.slice(-6).map((h) => h.text),
       })),
-      waitingOnHuman: this.engine.humanActions(tasks),
+      waitingOnHuman: this.humanActions(tasks),
     };
   }
 
@@ -2515,7 +2701,7 @@ export class GroveProcess {
   liveView() {
     if (!this.engine) return { agents: [], council: null, lastDecision: null, process: null };
     const s = { ...this.engine.state, tasks: this.viewTasks() };
-    const human = this.engine.humanActions(s.tasks);
+    const human = this.humanActions(s.tasks);
     const active = s.tasks.filter((t) => !TERMINAL.has(t.stage));
     const agents = [{
       id: 'grove-chief',
@@ -2555,7 +2741,7 @@ export class GroveProcess {
           taskColor: taskColor(t.id),
           group: activity === 'plan-review' || activity === 'code-review' ? huddle : null,
           groupLabel: activity === 'plan-review' || activity === 'code-review' ? huddleLabel : null,
-          error: errorText(t.lead.error) || (t.stalled ? `Stalled: stopped responding (${t.stalled.tickets.join(', ')})` : '') || (t.ship?.pr?.error ? `Can't read PR #${t.ship.pr.number}: ${t.ship.pr.error}` : ''),
+          error: (this.recoveryView(t)?.engineer ? `Engineer ${this.recoveryView(t).engineer}` : '') || errorText(t.lead.error) || (t.stalled ? `Stalled: stopped responding (${t.stalled.tickets.join(', ')})` : '') || (t.ship?.pr?.error ? `Can't read PR #${t.ship.pr.number}: ${t.ship.pr.error}` : ''),
           updatedAt: t.lead.claimedAt ?? s.updatedAt,
         });
       }
@@ -2569,7 +2755,7 @@ export class GroveProcess {
         const m = t.members?.[key];
         const working = k.status === 'running' && k.busy !== false
           && (!k.heartbeatAt || Date.now() - k.heartbeatAt <= HEARTBEAT_MS * 3);
-        if (!working && !m?.link && !memberError(k)) continue;
+        if (!working && !m?.link && !memberError(k, t)) continue;
         const kStep = t.steps.find((x) => x.id === k.step);
         agents.push({
           id: `grove-${t.id}-${key}`,
@@ -2585,7 +2771,7 @@ export class GroveProcess {
           group: working ? `${t.id}:${k.forum}` : null,
           groupLabel: working && kStep ? `${t.id} R${kStep.forum.round - kStep.forum.windowStart}` : null,
           ...(verdicts.has(key) ? { verdict: verdicts.get(key) } : {}),
-          error: memberError(k),
+          error: memberError(k, t),
           updatedAt: k.dispatchedAt ?? m?.since ?? s.updatedAt,
         });
       }

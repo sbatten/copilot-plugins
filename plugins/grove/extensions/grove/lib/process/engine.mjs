@@ -35,6 +35,11 @@ export const MAX_STEP_ROUNDS = 6;
 // A hire that hit the host's message limit waits this long before it is offered again.
 export const RATE_LIMIT_BACKOFF_MS = 15 * 60 * 1000;
 export const MAX_ATTEMPTS = 3;
+// An unreachable session (a failed send, an unclaimed hire, lost heartbeats) is usually transient: Grove
+// offers the same assignment to the same chat this many times, then replaces the session once, and then
+// stops until the human asks it to retry.
+export const REACH_LIMIT = 3;
+export const REACH_BACKOFF_MS = 30 * 1000;
 export const MAX_STEPS = 24;
 // How many decision outcomes a task keeps, so the Chief and the inbox can say what became of each one.
 export const DECISION_RESULTS = 30;
@@ -44,7 +49,7 @@ export const HEARTBEAT_TIMEOUT_MS = 4 * 60 * 1000;
 export const LEAD = 'lead';
 
 export const STEP_KINDS = Object.freeze(['plan', 'research', 'execute', 'verify']);
-export const DECISIONS = Object.freeze(['approve', 'changes', 'note', 'question', 'hold', 'resume', 'retry', 'merge', 'cancel', 'shelve', 'unshelve', 'acknowledge-error']);
+export const DECISIONS = Object.freeze(['approve', 'changes', 'note', 'question', 'hold', 'resume', 'retry', 'merge', 'cancel', 'shelve', 'unshelve', 'acknowledge-error', 'retry-recovery']);
 // The skill the engineer loads for each kind of step.
 export const KIND_SKILLS = Object.freeze({ plan: 'grove-plan', research: 'grove-research', execute: 'grove-execute', verify: 'grove-verify' });
 // What the human says the task is about; it picks the engineer's model.
@@ -306,6 +311,7 @@ export class ProcessEngine {
     this.state = { tasks: [], updatedAt: now() };
     this.byToolCall = new Map();
     this.claimingFrom = new Map();
+    this.staleLogged = new Set();
     this.board.projectDecisions = (task, items) => this.projectDecisions(task, items);
   }
 
@@ -355,7 +361,9 @@ export class ProcessEngine {
       normalizeTask(f, this.board.id);
       const local = byId.get(f.id);
       if (local && this.owns(local)) {
-        if (!this.board.staleTasks?.has(f.id) && f.owner === this.selfId && (f.revision ?? 0) === (local.revision ?? 0)
+        // Only the owner writes its task between human decisions (which bump controlRevision), so a local
+        // revision ahead of disk is a save still queued, not a newer board state to give up.
+        if (!this.board.staleTasks?.has(f.id) && f.owner === this.selfId && (f.revision ?? 0) <= (local.revision ?? 0)
           && (f.controlRevision ?? 0) === (local.controlRevision ?? 0)) {
           next.push(local);
           continue;
@@ -365,6 +373,7 @@ export class ProcessEngine {
       if (!local || local.updatedAt !== f.updatedAt || local.owner !== f.owner || local.revision !== f.revision) changed.push(f.id);
       next.push(f);
       this.board.staleTasks?.delete(f.id);
+      this.staleLogged.delete(f.id);
     }
     // Keep owned tasks whose file has not been written yet.
     for (const t of this.state.tasks) if (this.owns(t) && !fresh.some((f) => f.id === t.id)) next.push(t);
@@ -390,7 +399,14 @@ export class ProcessEngine {
         task.revision = revision + 1;
         this.board.saveTask(task, from ?? this.selfId, revision).then(() => {
           if (from !== undefined && this.claimingFrom.get(task.id) === from) this.claimingFrom.delete(task.id);
-        }).catch((err) => this.log(`Grove could not save ${task.id}: ${err.message}`, 'error'));
+        }).catch((err) => {
+          // A refused write is recovered by the next refresh; report it once per episode, not per queued save.
+          if (['stale_task', 'not_owner'].includes(err.code)) {
+            if (this.staleLogged.has(task.id)) return;
+            this.staleLogged.add(task.id);
+            this.log(`Grove will reload ${task.id} before its next change: ${err.message}`, 'warning');
+          } else this.log(`Grove could not save ${task.id}: ${err.message}`, 'error');
+        });
       }
       else this.log(`Grove: ${task.id} is owned by another session; not saving.`, 'warning');
     }
@@ -461,9 +477,27 @@ export class ProcessEngine {
   }
 
   // Decisions only the human can make. The Chief of Staff presents these in its chat.
-  humanActions(tasks = this.state.tasks) {
+  // `leadRecovery` is the Chief's record of engineers it could not reach (board meta), by task.
+  humanActions(tasks = this.state.tasks, { leadRecovery = {} } = {}) {
     const out = [];
     for (const t of tasks) {
+      if (!TERMINAL.has(t.stage) && t.stage !== 'shelved') {
+        const eps = [...Object.entries(t.recovery ?? {}), ...(leadRecovery[t.id] ? [['lead', leadRecovery[t.id]]] : [])].filter(([, ep]) => ep?.exhaustedAt);
+        if (eps.length) {
+          const who = eps.map(([key]) => (key === 'lead' ? 'engineer' : t.members?.[key]?.title ?? key));
+          out.push({
+            taskId: t.id,
+            title: t.title,
+            name: t.name ?? null,
+            kind: 'unrecoverable',
+            members: eps.map(([key]) => key),
+            role: who.join(', '),
+            text: `${taskLabel(t)} "${t.title}": Grove could not reach its ${who.join(' or ')}, even after replacing ${eps.length === 1 ? 'it' : 'them'} (${eps.map(([, ep]) => ep.reason).join('; ')}). It stopped retrying.`,
+            reason: eps.map(([, ep]) => ep.reason).join('; '),
+            since: Math.max(...eps.map(([, ep]) => ep.exhaustedAt)),
+          });
+        }
+      }
       if (t.stage === 'awaiting-approval' && t.delivery) {
         const v = this.latestEvidence(t);
         const result = this.latestResult(t);
@@ -619,7 +653,7 @@ export class ProcessEngine {
         continue;
       }
       try {
-        this.humanDecision({ taskId: task.id, action: d.action, note: d.note ?? '', ship: typeof d.ship === 'boolean' ? d.ship : undefined, errorId: d.errorId, errorOwner: d.errorOwner });
+        this.humanDecision({ taskId: task.id, action: d.action, note: d.note ?? '', ship: typeof d.ship === 'boolean' ? d.ship : undefined, errorId: d.errorId, errorOwner: d.errorOwner, unrecoverable: d.unrecoverable === true });
         this.noteDecision(task, d, 'applied');
         applied.push(d);
       } catch (err) {
@@ -646,6 +680,7 @@ export class ProcessEngine {
     cancelOpenTickets(t);
     for (const s of t.steps) if (s.status !== 'done') s.status = 'skipped';
     t.stage = 'cancelled';
+    t.recovery = {};
     this.changed(t, `Cancelled${reason ? `: ${clip(reason, 200)}` : ''}`);
     return t;
   }
@@ -826,7 +861,10 @@ export class ProcessEngine {
       task.feedback.push({ from: 'engineer', at: now(), text: clip(note, 4000) });
       this.changed(task, `Adjusted ${step.id}: ${clip(note, 300)}`);
     }
+    // The task keeps a clipped copy; the full text is kept beside it, written before the task is saved.
+    const full = typeof this.board?.writeOutput === 'function' ? await this.board.writeOutput(task.id, step.id, step.version + 1, text) : null;
     this.recordStepOutput(task, step, text, checked);
+    step.outputRef = full;
     return { task, step };
   }
 
@@ -945,9 +983,13 @@ export class ProcessEngine {
     if (!found || !this.owns(found.task)) return;
     const { task, ticket } = found;
     if (!success) {
-      const m = this.member(task, ticket);
-      if (ticket.via === 'send_message' && m && chatGone(error)) m.status = 'lost';
-      if (ticket.status === 'dispatched') this.failTicket(task, ticket, `could not reach the session: ${clip(error || 'tool failed', 160)}`, { retryAt: rateLimited(error) ? now() + RATE_LIMIT_BACKOFF_MS : null });
+      if (ticket.status !== 'dispatched') return;
+      if (rateLimited(error)) {
+        this.failTicket(task, ticket, `could not reach the session: ${clip(error || 'tool failed', 160)}`, { retryAt: now() + RATE_LIMIT_BACKOFF_MS });
+        return;
+      }
+      // Only an explicit deletion means the chat is gone; anything else (unknown owner, not loaded) may pass.
+      this.unreachable(task, ticket, `could not reach the session: ${clip(error || 'tool failed', 160)}`, { lost: ticket.via === 'send_message' && chatGone(error) });
       return;
     }
     // Only create_session returns the new chat's own link (send_message reports the parent session).
@@ -982,6 +1024,9 @@ export class ProcessEngine {
     if (result.token !== ticket.token) return false;
     if (ticket.status === 'done' || ticket.status === 'failed' || ticket.status === 'cancelled') return false;
     if (TERMINAL.has(task.stage) || task.stage === 'shelved' || task.stage === 'escalated' || task.stage === 'awaiting-approval' || PAUSED_STAGES.has(task.stage)) return false;
+    // A heartbeat from before Grove last re-offered this ticket is the one that went quiet, not new progress.
+    if (result.status === 'running' && ticket.reachedAt && !(Number(result.heartbeat) > ticket.reachedAt)) return false;
+    this.reached(task, ticket.member);
     const m = task.members[ticket.member];
     if (m && result.sessionId) m.sessionId = result.sessionId;
     if (m) { m.status = 'alive'; m.seenAt = now(); }
@@ -1041,15 +1086,13 @@ export class ProcessEngine {
       if (TERMINAL.has(t.stage)) continue;
       for (const k of t.tickets) {
         if (k.status === 'dispatched' && at - k.dispatchedAt > CLAIM_TIMEOUT_MS) {
-          const m = t.members[k.member];
-          if (m) m.status = 'lost';
           // Grove claims a hire as soon as the new chat's prompt reaches its hook, so a chat the host created
-          // that never claimed one received the bare hire text: Grove isn't loaded there.
+          // that never claimed one received the bare hire text: Grove isn't loaded there, and only a new chat helps.
           const created = k.via === 'create_session' && k.link;
-          this.failTicket(t, k, created ? 'Grove was not loaded in its new chat, so it never received its brief' : 'its session never started the work');
+          this.unreachable(t, k, created ? 'Grove was not loaded in its new chat, so it never received its brief' : 'its session never started the work', { lost: !!created });
           n += 1;
         } else if (k.status === 'running' && at - (k.heartbeatAt ?? k.startedAt) > HEARTBEAT_TIMEOUT_MS) {
-          this.failTicket(t, k, 'its session stopped responding');
+          this.unreachable(t, k, 'its session stopped responding');
           n += 1;
         }
       }
@@ -1060,6 +1103,61 @@ export class ProcessEngine {
   completeTicket(ticket) {
     ticket.status = 'done';
     ticket.endedAt = now();
+  }
+
+  // A hire's session could not be reached (a failed send, no claim, or lost heartbeats). That is usually
+  // transient, so the same ticket — same id and token, so a late report still counts — is offered to the same
+  // chat again after a backoff. After REACH_LIMIT failures the reviewer is replaced once in a new chat (its
+  // forum is kept); after the replacement's budget too, Grove stops and the task needs the human.
+  // `lost` marks a chat that is certainly gone, so the next offer goes to a new session.
+  unreachable(task, ticket, why, { lost = false } = {}) {
+    const at = now();
+    const key = ticket.member;
+    task.recovery ??= {};
+    const ep = task.recovery[key] ??= { since: at, reason: why, reach: 0, replaced: 0, exhaustedAt: null };
+    ep.reach += 1;
+    ep.reason = why;
+    const m = task.members[key];
+    if (m && lost) m.status = 'lost';
+    const who = this.describe(task, ticket);
+    if (TERMINAL.has(task.stage) || task.stage === 'escalated') {
+      this.failTicket(task, ticket, why);
+      return;
+    }
+    if (ep.reach < REACH_LIMIT) {
+      Object.assign(ticket, {
+        status: 'issued', dispatchedAt: null, startedAt: null, endedAt: null, heartbeatAt: undefined, busy: undefined,
+        via: undefined, link: undefined, reachedAt: at, retryAt: at + REACH_BACKOFF_MS * 2 ** (ep.reach - 1), retryWhy: 'reach', previousFailure: why,
+      });
+      const where = this.route(task, ticket).tool === 'send_message' ? 'the same session' : 'a new session';
+      this.changed(task, `${who} could not be reached (${why}); offering ${ticket.id} to ${where} again (attempt ${ep.reach + 1} of ${REACH_LIMIT}).`);
+      return;
+    }
+    if (!ep.replaced && ticket.role === 'reviewer') {
+      ticket.status = 'cancelled';
+      ticket.endedAt = at;
+      ticket.failure = why;
+      if (m) m.status = 'lost';
+      const next = this.issue(task, { specialty: ticket.specialty, step: ticket.step, round: ticket.round });
+      next.previousFailure = why;
+      next.retryWhy = 'replace';
+      Object.assign(ep, { since: at, reach: 0, replaced: 1 });
+      this.changed(task, `${who} could not be reached ${REACH_LIMIT} times (${why}); replacing it with a new session as ${next.id}. Its forum is kept.`);
+      return;
+    }
+    ticket.status = 'failed';
+    ticket.endedAt = at;
+    ticket.failure = why;
+    ep.exhaustedAt = at;
+    this.changed(task, `${who} is unrecoverable: ${why}. Grove stopped retrying; the human can retry recovery.`);
+  }
+
+  // The member answered: its recovery episode (if any) is over.
+  reached(task, key) {
+    const ep = task.recovery?.[key];
+    if (!ep) return;
+    delete task.recovery[key];
+    this.changed(task, `${key === 'lead' ? 'The engineer' : task.members[key]?.title ?? key} is reachable again${ep.replaced ? ' after a replacement' : ''}.`);
   }
 
   // A failed hire is retried in the same reviewer session when it still exists (the session keeps its
@@ -1082,7 +1180,7 @@ export class ProcessEngine {
       ...ticket, id: `${task.id}-${code}-${++task.seq}`, status: 'issued', attempt: retryAt ? ticket.attempt : ticket.attempt + 1, blocks: 0, retryAt,
       token: crypto.randomBytes(8).toString('hex'), issuedAt: now(), dispatchedAt: null, startedAt: null, endedAt: null,
       heartbeatAt: undefined, failure: undefined, via: undefined, link: undefined, sessionId: undefined,
-      sessionError: undefined, previousFailure: why,
+      sessionError: undefined, previousFailure: why, reachedAt: undefined, retryWhy: retryAt ? 'rate-limit' : undefined,
     };
     task.tickets.push(retry);
     const where = this.route(task, retry).tool === 'send_message' ? 'in the same session' : 'in a new session';
@@ -1099,6 +1197,7 @@ export class ProcessEngine {
     for (const k of task.tickets) if (k.step === step.id && k.specialty === specialty && !['done', 'failed', 'cancelled'].includes(k.status)) k.status = 'cancelled';
     const member = task.members[`reviewer-${specialty}`];
     if (member) member.status = 'lost';
+    delete task.recovery[`reviewer-${specialty}`];
     task.pause = null;
     task.escalation = null;
     task.stage = 'reviewing';
@@ -1213,7 +1312,7 @@ export class ProcessEngine {
   // ---------- human decisions ----------
 
   // Why a decision can't apply to the task as it stands, or null. The Chief checks before recording one.
-  decisionError(task, action, note = '', { ship, errorId, errorOwner } = {}) {
+  decisionError(task, action, note = '', { ship, errorId, errorOwner, unrecoverable } = {}) {
     if (action === 'acknowledge-error') {
       if (ship !== undefined) return 'ship only applies to "approve".';
       return task.lead?.error && errorId && errorId === sessionErrorId(task.lead.error)
@@ -1230,7 +1329,8 @@ export class ProcessEngine {
     const st = task.stage;
     const label = stageLabel(task);
     if (!DECISIONS.includes(action)) return `decision must be one of ${DECISIONS.join(', ')}.`;
-    if (action === 'shelve') return SHELVABLE.has(st) ? null : `${task.id} is "${label}"; only a task waiting on the human can be shelved.`;
+    // A task Grove could not recover is waiting on the human too, whatever stage it stopped in.
+    if (action === 'shelve') return SHELVABLE.has(st) || unrecoverable || hasUnrecoverable(task) ? null : `${task.id} is "${label}"; only a task waiting on the human can be shelved.`;
     if (action === 'unshelve') return `${task.id} isn't on the shelf.`;
     if (st === 'cancelled' && action !== 'changes') return `${task.id} is cancelled. Record "changes" with explicit human direction to reopen it.`;
     if (st === 'done' && action !== 'changes') return `${task.id} is done. To reopen it, record "changes" with what the human wants.`;
@@ -1246,15 +1346,16 @@ export class ProcessEngine {
         return null;
       case 'hold': return HOLDABLE.has(st) || st === 'blocked' ? null : `${task.id} is "${label}"; only a task in progress can be put on hold.`;
       case 'resume': case 'retry': return null;
+      case 'retry-recovery': return unrecoverable || hasUnrecoverable(task) ? null : `Nothing on ${task.id} is unrecoverable; Grove is still handling it.`;
       case 'merge': return ['ready-to-merge', 'watching'].includes(st) && task.ship?.pr ? null : `${task.id} has no open pull request to merge (it is "${label}").`;
       default: return null;
     }
   }
 
-  humanDecision({ taskId, action, note = '', ship, errorId, errorOwner }) {
+  humanDecision({ taskId, action, note = '', ship, errorId, errorOwner, unrecoverable }) {
     const task = this.task(taskId);
     const msg = clip(note, 4000);
-    const err = this.decisionError(task, action, msg, { ship, errorId, errorOwner });
+    const err = this.decisionError(task, action, msg, { ship, errorId, errorOwner, unrecoverable });
     if (err) throw new ProcessError('invalid_state', err);
     if (action === 'acknowledge-error') {
       task.lead.errorAcknowledgment = { errorId, owner: task.owner, at: now(), note: msg, error: task.lead.error };
@@ -1269,6 +1370,8 @@ export class ProcessEngine {
     if (action === 'shelve') {
       task.shelf = { from: task.stage, at: now(), note: msg };
       task.stage = 'shelved';
+      // Set aside: bringing it back starts any recovery afresh.
+      task.recovery = {};
       this.changed(task, `You put the task on the shelf${msg ? `: ${clip(msg, 200)}` : ''}. It waits there until you bring it back.`);
       return task;
     }
@@ -1289,6 +1392,10 @@ export class ProcessEngine {
       else this.pause(task, 'hold', { note: msg });
       task.stage = 'on-hold';
       this.changed(task, `You put the task on hold${msg ? `: ${clip(msg, 200)}` : ''}. Everyone stops until you resume it.`);
+      return task;
+    }
+    if (action === 'retry-recovery') {
+      this.retryRecovery(task, msg);
       return task;
     }
     if (action === 'resume' || action === 'retry') {
@@ -1401,6 +1508,24 @@ export class ProcessEngine {
 
   // ---------- pause, block, shelf, updates, answers ----------
 
+  // The human asked Grove to try again: each reviewer it gave up on gets a fresh budget and a new session.
+  // (An unreachable engineer is the Chief's to replace; its episode lives in the board meta.)
+  retryRecovery(task, msg) {
+    const step = currentStep(task);
+    const names = [];
+    for (const [key, ep] of Object.entries(task.recovery)) {
+      if (!ep.exhaustedAt) continue;
+      delete task.recovery[key];
+      const last = task.tickets.findLast((k) => k.member === key);
+      if (last?.status === 'failed' && step && last.step === step.id && step.status === 'reviewing') {
+        if (task.members[key]) task.members[key].status = 'lost';
+        this.issue(task, { specialty: last.specialty, step: step.id, round: step.forum.round });
+      }
+      names.push(task.members[key]?.title ?? key);
+    }
+    this.changed(task, `You asked Grove to retry recovery${names.length ? ` of the ${names.join(', ')}` : ''}${msg ? `: ${clip(msg, 200)}` : ''}.`);
+  }
+
   // Back where it was when it was shelved.
   unshelve(task, line) {
     task.stage = task.shelf?.from ?? 'awaiting-approval';
@@ -1414,6 +1539,8 @@ export class ProcessEngine {
     const step = currentStep(task);
     task.pause = { kind, at: now(), from: task.stage, step: step?.id ?? null, stepStatus: step?.status ?? null, ...info };
     cancelOpenTickets(task);
+    // The human holds it now: resuming starts any recovery afresh.
+    task.recovery = {};
     task.stage = kind === 'hold' ? 'on-hold' : 'blocked';
   }
 
@@ -1460,11 +1587,12 @@ export class ProcessEngine {
   }
 
   // The engineer's status board: progress the human can read in the grove, the task view and the report.
-  postUpdate(taskId, text) {
+  // `next` and `effects` are hand-over notes: what the engineer means to do, and what it changed outside Grove.
+  postUpdate(taskId, text, { next = '', effects = '' } = {}) {
     const t = this.task(taskId);
     const msg = clip(text, 1500);
     if (!msg) throw new ProcessError('invalid_input', 'Write the update.');
-    t.updates.push({ at: now(), text: msg });
+    t.updates.push({ at: now(), text: msg, ...(clip(next, 600) ? { next: clip(next, 600) } : {}), ...(clip(effects, 600) ? { effects: clip(effects, 600) } : {}) });
     if (t.updates.length > 100) t.updates.splice(0, t.updates.length - 100);
     this.changed(t, `Update: ${clip(msg, 160)}`);
     return t;
@@ -1627,6 +1755,8 @@ function normalizeTask(t, boardId) {
   t.ship ??= null;
   t.shelf ??= null;
   t.steps ??= [];
+  // Open recovery episodes, by member key ('lead' for the engineer).
+  if (!t.recovery || typeof t.recovery !== 'object' || Array.isArray(t.recovery)) t.recovery = {};
   for (const k of t.tickets) {
     k.dispatcher ??= LEAD;
     k.member ??= memberKey(k);
@@ -1655,8 +1785,12 @@ function rateLimited(error) {
 }
 
 // Only these mean the reviewer's chat is gone and a new one is needed.
+function hasUnrecoverable(task) {
+  return Object.values(task.recovery ?? {}).some((ep) => ep?.exhaustedAt);
+}
+
 function chatGone(error) {
-  return /unknown chat|no such (chat|session)|not found|no longer exists|was deleted|has been closed/i.test(String(error ?? ''));
+  return /no longer exists|was deleted|has been closed/i.test(String(error ?? ''));
 }
 
 // Older saved errors predate occurrence ids.

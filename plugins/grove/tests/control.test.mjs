@@ -10,7 +10,7 @@ const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'grove-control-'));
 process.env.COPILOT_HOME = path.join(tmp, 'home');
 const { GroveProcess } = await import('../extensions/grove/lib/process/integration.mjs');
 const { Board } = await import('../extensions/grove/lib/process/board.mjs');
-const { ProcessEngine } = await import('../extensions/grove/lib/process/engine.mjs');
+const { ProcessEngine, REACH_LIMIT, CLAIM_TIMEOUT_MS, HEARTBEAT_TIMEOUT_MS } = await import('../extensions/grove/lib/process/engine.mjs');
 const { decisionLine } = await import('../extensions/grove/web/decision-text.mjs');
 const processes = [];
 let serial = 0;
@@ -174,6 +174,44 @@ try {
     assert.equal(engineer.proc.leadTask().stage, 'cancelled');
   }
 
+  // A change made while refresh reads the board (a relay or poll racing a tool) keeps its queued save
+  // instead of adopting the older file and refusing every later save.
+  {
+    const { engineer } = await setup();
+    const { engine, board } = engineer.proc;
+    await board.flush();
+    const read = board.readTasks.bind(board);
+    board.readTasks = async () => {
+      const snapshot = await read();
+      board.readTasks = read;
+      engine.changed(engine.task('T1'), 'Concurrent relay');
+      return snapshot;
+    };
+    const logged = [];
+    engine.log = (line, level) => logged.push([level, line]);
+    await engine.refresh();
+    engine.changed(engine.task('T1'), 'Next change');
+    await board.flush();
+    assert.equal((await board.readTasks())[0].revision, engine.task('T1').revision);
+    assert.deepEqual(logged.filter(([level]) => level !== 'info'), []);
+    const out = await engineer.call('grove_next');
+    assert.ok(out, 'tools keep working after the race');
+
+    // A tool whose own save was refused by a racing write is repeated once on the reloaded task; one whose
+    // save already landed is not repeated, and the agent is told to inspect state instead.
+    const refusedSave = () => board.saveTask(structuredClone(engine.task('T1')), engineer.proc.selfId, -1).catch(() => {});
+    const post = engine.postUpdate.bind(engine);
+    const updates = async () => (await board.readTasks())[0].updates?.filter((u) => /Raced update/.test(u.text)).length ?? 0;
+    engine.postUpdate = (...args) => { engine.postUpdate = post; refusedSave(); return post(...args); };
+    await engineer.call('grove_update', { text: 'Raced update one' });
+    assert.equal(await updates(), 1);
+    engine.postUpdate = (...args) => { engine.postUpdate = post; const r = post(...args); refusedSave(); return r; };
+    const conflict = await engineer.proc.tools().find((t) => t.name === 'grove_update').handler({ text: 'Raced update two' });
+    assert.equal(conflict.resultType, 'failure');
+    assert.match(conflict.textResultForLlm, /check grove_next or grove_status before repeating/);
+    assert.equal(await updates(), 2, 'the landed update is not repeated');
+  }
+
   // Real separate processes: a delayed save or claim cannot undo cancellation.
   for (const mode of ['save', 'claim', 'queued']) {
     const { chief } = await setup();
@@ -260,7 +298,8 @@ try {
     await fs.writeFile(file, original);
   }
 
-  // Notification failure is separate from application and never orders replacement.
+  // Notification failure is separate from application, is retried within its budget (an unknown chat
+  // owner is usually a chat the host hasn't loaded yet), and never orders a replacement.
   {
     const { chief } = await setup();
     await chief.proc.board.updateMeta((meta) => {
@@ -274,11 +313,59 @@ try {
     await chief.proc.relaySent({ taskId: 'T1', seq: relay.seq, generation: relay.generation, attempt: relay.attempt, target: out.message.session }, { success: false, error: { message: 'Unknown chat owner' } });
     const status = chief.proc.decisionView('T1');
     assert.equal(status.state, 'applied');
-    assert.equal(status.notification, 'unavailable');
-    assert.match(decisionLine(status, chief.proc.engine.task('T1')), /Applied.*notification unavailable/);
+    assert.equal(status.notification, 'delivery-failed');
+    assert.match(decisionLine(status, chief.proc.engine.task('T1')), /Applied.*notification failed/);
     for (let i = 0; i < 100; i++) await chief.proc.relayToChief();
-    assert.equal(relay.attempts, 1);
-    assert.equal(chief.sent.length, 0);
+    assert.ok(chief.sent.every((m) => !/grove_handoff|Replace it/.test(m)), 'an engineer that is still reporting is never replaced');
+  }
+
+  // An engineer whose chat stopped reporting while it has work is nudged REACH_LIMIT times, then replaced once
+  // without asking the human; if the replacement never starts, the human is asked, and can retry.
+  {
+    const { chief } = await setup();
+    const t = chief.proc.engine.task('T1');
+    await chief.proc.board.updateMeta((meta) => {
+      meta.leadRoutes = { T1: { token: t.lead.token, link: 'agent-host-session://ahp-session/eng' } };
+    });
+    // The engineer's chat stops reporting (its Grove last observed it now).
+    let clock = Date.now() + HEARTBEAT_TIMEOUT_MS + 1000;
+    chief.proc.now = () => clock;
+    chief.sent.length = 0;
+    for (let i = 0; i < REACH_LIMIT; i++) {
+      await chief.proc.relayToChief();
+      clock += 10 * 60 * 1000;
+    }
+    const nudges = chief.sent.filter((m) => /Reach attempt/.test(m));
+    assert.equal(nudges.length, REACH_LIMIT, chief.sent.join('\n---\n'));
+    assert.match(nudges[0], /send_message with session: agent-host-session:\/\/ahp-session\/eng, delivery: steer, message: \[Grove\] T1: .*grove_next/);
+    assert.match(nudges[0], /Don't ask the human or replace the engineer/);
+    assert.deepEqual(chief.proc.recoveryView(chief.proc.engine.task('T1')), { engineer: `reconnecting 3/${REACH_LIMIT} (its chat stopped reporting while it had work to do)` });
+    assert.equal(chief.proc.liveView().agents.find((a) => a.id === 'grove-engineer-T1')?.error, `Engineer reconnecting 3/${REACH_LIMIT} (its chat stopped reporting while it had work to do)`, 'the engineer sprite shows it');
+    await chief.proc.relayToChief();
+    assert.match(chief.sent.at(-1), /could not be reached after 3 attempts.*Replace it now, without asking the human: call grove_handoff with taskId "T1"/);
+    assert.equal(chief.proc.humanActions().length, 0, 'the human is not asked yet');
+    await chief.call('grove_handoff', { taskId: 'T1' });
+    for (let i = 0; i < REACH_LIMIT; i++) {
+      clock += CLAIM_TIMEOUT_MS + 1;
+      await chief.proc.relayToChief();
+      assert.match(chief.sent.at(-1), /its replacement has not started.*call grove_handoff/);
+    }
+    clock += CLAIM_TIMEOUT_MS + 1;
+    await chief.proc.relayToChief();
+    const [item] = chief.proc.humanActions();
+    assert.equal(item?.kind, 'unrecoverable');
+    assert.equal(item.role, 'engineer');
+    assert.match(chief.sent.at(-1), /could not reach its engineer.*retry recovery from the Grove inbox/);
+    const notices = chief.sent.length;
+    await chief.proc.relayToChief();
+    assert.equal(chief.sent.length, notices, 'told once');
+    const row = chief.proc.inboxView(chief.proc.humanActions()).items[0];
+    assert.deepEqual([row.kind, row.label], ['unrecoverable', 'Unrecoverable · engineer unreachable']);
+    const retried = await chief.proc.inboxDecide('T1', 'retry');
+    assert.equal(retried.decision, 'retry-recovery');
+    assert.equal(chief.proc.board.meta.leadRecovery.T1, undefined, 'a fresh budget');
+    assert.equal(chief.proc.humanActions().length, 0);
+    assert.equal((await chief.proc.inboxDecide('T1', 'retry')).duplicate, true, 'a second click is the same decision');
   }
 
   // A transient failure has a persisted send budget, including the idle fallback.

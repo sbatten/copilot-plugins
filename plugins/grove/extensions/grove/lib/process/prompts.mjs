@@ -85,6 +85,13 @@ function indent(t) {
   return String(t).split('\n').map((l) => `  ${l}`).join('\n');
 }
 
+// A step's output as stored on the task, with where to read the rest when it was clipped there or here.
+export function stepOutput(s, room = Infinity) {
+  const text = s.output.length > room ? `${s.output.slice(0, room - 1)}…` : s.output;
+  const ref = s.outputRef;
+  return ref?.path && ref.chars > text.length ? `${text}\n\n(Shown in part: the full output, ${ref.chars} characters, is in ${ref.path}. Read it there.)` : text;
+}
+
 // What earlier steps produced, newest in full and older ones trimmed, so a reviewer has the context it needs
 // (the approved plan when reviewing code, and so on), and an engineer that took over can catch up.
 function earlierResults(task, step) {
@@ -94,8 +101,8 @@ function earlierResults(task, step) {
   const blocks = [];
   for (const s of before.reverse()) {
     const room = Math.max(1500, Math.min(budget, blocks.length ? 6000 : 16000));
-    const text = s.output.length > room ? `${s.output.slice(0, room - 1)}…` : s.output;
-    budget -= text.length;
+    const text = stepOutput(s, room);
+    budget -= Math.min(text.length, room);
     blocks.unshift(`### ${stepLabel(s)} (v${s.version})\n${text}`);
     if (budget <= 0) break;
   }
@@ -137,7 +144,7 @@ ${again}
 ${step.reviewers.length > 1 ? `The review is a shared forum: the ${step.reviewers.map((x) => x.name).join(', ')} reviewers and the engineer. ` : ''}Approval must be **unanimous**. ${step.reviewers.length > 1 ? 'Read the discussion, respond to the other reviewers where you agree or disagree, and only' : 'Only'} raise objections that genuinely block approval. Non-blocking suggestions are welcome but must not stop you from approving.
 
 ## Under review: ${stepLabel(step)} (v${step.version})
-${step.brief ? `What the step was asked to do: ${step.brief}\n\n` : ''}${step.output}
+${step.brief ? `What the step was asked to do: ${step.brief}\n\n` : ''}${stepOutput(step)}
 ${inspect}
 ## Discussion so far
 ${forumTranscript(step)}
@@ -330,6 +337,12 @@ export const MEMBER_MARKER = /\[grove-hire:([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/(
 // Reminder Grove adds to a reviewer's later turns.
 export function memberContext(task, ticket) {
   return `Grove: this chat is the ${memberTitle(ticket)} for ${taskLabel(task)} "${task.title}", working on ${ticket.id}. Call grove_submit_review with your review and verdict, then send its returned native message to the engineer. End your turn; no stop-hook correction loop is needed.`;
+}
+
+// The same assignment again in the chat that already has its brief: after a restart, or a hire re-sent
+// because this chat didn't answer. Continue; don't start over.
+export function memberContinuation(task, ticket, why) {
+  return `[Grove] Your assignment ${ticket.id} (${memberTitle(ticket)} for ${taskLabel(task)} "${task.title}") was interrupted: ${why}. Its brief is earlier in this chat and nothing you found is lost. Continue from where you stopped: finish the review, call grove_submit_review with it, send its returned message to the engineer, then end your turn.`;
 }
 
 // Grove wakes the engineer itself (a decision made in the Grove inbox, or one missed while it was down). It lists

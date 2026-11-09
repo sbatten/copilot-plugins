@@ -155,6 +155,13 @@ export class InboxPanel {
     });
   }
 
+  // Grove gave up reaching one of the task's sessions: start a fresh recovery (a new session if needed).
+  retryRecovery(t) {
+    return this.act(t.id, 'retry', () => this.api('api/inbox/decide', { taskId: t.id, action: 'retry' }), (out) => {
+      this.onStatus(toastText('retry', t, out));
+    });
+  }
+
   // Set a task that's waiting on you aside for later, or bring it back into the inbox.
   shelve(t, back = false) {
     return this.act(t.id, back ? 'unshelve' : 'shelve', () => this.api('api/inbox/decide', { taskId: t.id, action: back ? 'unshelve' : 'shelve' }), () => {
@@ -201,6 +208,8 @@ export class InboxPanel {
       // Blockers are answered through the Chief of Staff (attach the task and say it's done), not a button.
       if (shelved) { /* no other answers here: bring it back, or attach it and tell the Chief */ } else if (ask?.kind === 'merge') {
         out.push(el('button', { type: 'button', class: 'act act-complete', disabled: busy || pending === 'merge', 'aria-label': `Merge ${who}'s pull request`, title: 'The team merges the pull request (without bypassing checks or reviews)', onclick: () => this.merge(t) }, '⇢ Merge'));
+      } else if (ask?.kind === 'unrecoverable') {
+        out.push(el('button', { type: 'button', class: 'act act-complete', disabled: busy || pending === 'retry-recovery', 'aria-label': `Retry recovering ${who}`, title: 'Grove tries again: the same session first, then a new one if it still can\'t be reached. Nothing done so far is lost.', onclick: () => this.retryRecovery(t) }, '↻ Retry recovery'));
       } else if (ask && ask.kind !== 'blocked') {
         const accept = ask.kind === 'input';
         const ships = ask.kind === 'sign-off' && /PR/.test(ask.label);

@@ -112,6 +112,7 @@ export class Board {
     this.writes = Promise.resolve();
     this.reported = new Set();
     this.staleTasks = new Set();
+    this.savedTasks = 0;
   }
 
   get id() {
@@ -263,15 +264,42 @@ export class Board {
     return path.join(this.root, 'tasks', `${id}.json`);
   }
 
+  // The full text of a step's submission (a task keeps a clipped copy): outputs/<task>/<step>-v<version>.md.
+  outputFile(taskId, stepId, version) {
+    if (!TASK_ID.test(String(taskId)) || !BOARD_ID.test(String(stepId)) || !Number.isInteger(version)) throw new BoardError('invalid_input', 'Not a step output.');
+    return path.join(this.root, 'outputs', taskId, `${stepId}-v${version}.md`);
+  }
+
+  async writeOutput(taskId, stepId, version, text) {
+    const file = this.outputFile(taskId, stepId, version);
+    const data = Buffer.from(String(text), 'utf8');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.${crypto.randomBytes(5).toString('hex')}.tmp`;
+    try {
+      await fs.writeFile(tmp, data);
+      await fs.rename(tmp, file);
+    } catch (err) {
+      await fs.rm(tmp, { force: true }).catch(() => {});
+      throw new BoardError('storage_failed', `Could not write ${file}: ${err.message}`);
+    }
+    return { path: file, bytes: data.length, chars: String(text).length, sha256: crypto.createHash('sha256').update(data).digest('hex') };
+  }
+
   resultFile(ticketId) {
     if (!isTicketId(ticketId)) throw new BoardError('invalid_ticket', `"${ticketId}" is not a ticket id.`);
     return path.join(this.root, 'results', `${ticketId}.json`);
   }
 
-  // Member session only: report progress or the final result for its ticket.
+  // Member session only: report progress or the final result for its ticket. A recorded result is final: a
+  // late heartbeat or a different outcome never replaces it, and repeating the same outcome changes nothing.
   writeResult(result) {
     const data = { format: FORMATS.result, version: VERSION, ...result, at: Date.now() };
-    return this.queue(() => writeJson(this.resultFile(result.ticket), data));
+    return this.queue(async () => {
+      const prior = await this.readResult(result.ticket).catch(() => null);
+      if (prior && prior.token === result.token && ['done', 'failed'].includes(prior.status)) return false;
+      await writeJson(this.resultFile(result.ticket), data);
+      return true;
+    });
   }
 
   async readResult(ticketId) {
@@ -423,7 +451,9 @@ export class Board {
         throw new BoardError('stale_task', `${task.id} changed on the board; reload before continuing.`);
       }
       await writeJson(this.taskFile(task.id), snapshot);
+      this.savedTasks += 1;
     })).catch((err) => {
+      err.task ??= task.id;
       this.staleTasks.add(task.id);
       this.writeError ??= err;
       throw err;

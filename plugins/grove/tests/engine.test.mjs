@@ -196,8 +196,68 @@ assert.equal(engine.issuedTickets([t]).length, 1);
 engine.authorizeHire({ marker: retry.id, tool: 'send_message', target: 'agent-host-session://ahp-session/L?chat=code' });
 engine.bindToolCall('c3', retry.id);
 engine.dispatchEnded({ toolCallId: 'c3', success: false, error: 'Unknown chat owner: ahp-chat:/code' });
-assert.equal(t.members['reviewer-code'].status, 'lost', 'a chat that is gone is replaced');
-assert.deepEqual(engine.route(t, t.tickets.at(-1)), { tool: 'create_session' });
+// ---- an unreachable reviewer: the same ticket again, then one replacement, then the human ----
+assert.equal(t.members['reviewer-code'].status, 'alive', 'an unknown owner is usually a chat that is not loaded yet, not a lost one');
+assert.equal(t.tickets.at(-1), retry, 'the same ticket is offered again');
+assert.equal(retry.status, 'issued');
+const token0 = retry.token;
+assert.equal(retry.retryWhy, 'reach');
+assert.ok(retry.retryAt > Date.now(), 'after a backoff');
+assert.equal(t.recovery['reviewer-code'].reach, 1);
+assert.deepEqual(engine.route(t, retry), { tool: 'send_message', session: 'agent-host-session://ahp-session/L?chat=code' }, 'to the same chat');
+// A heartbeat the reviewer wrote before the failure doesn't flip the reset ticket back to running.
+assert.equal(await engine.applyResult({ ticket: retry.id, token: token0, status: 'running', heartbeat: retry.reachedAt - 1 }), false);
+assert.equal(retry.status, 'issued');
+const fail = (k, id, error = 'host refused') => {
+  k.retryAt = Date.now() - 1;
+  engine.authorizeHire({ marker: k.id, tool: engine.route(t, k).tool, target: engine.route(t, k).session });
+  engine.bindToolCall(id, k.id);
+  engine.dispatchEnded({ toolCallId: id, success: false, error });
+};
+fail(retry, 'c3b');
+assert.equal(retry.status, 'issued');
+assert.equal(t.recovery['reviewer-code'].reach, 2);
+// A reply arriving now (same token) still counts and ends the episode.
+retry.status = 'dispatched';
+assert.equal(await engine.applyResult({ ticket: retry.id, token: token0, status: 'running', heartbeat: Date.now() + 1 }), true);
+assert.equal(t.recovery['reviewer-code'], undefined, 'reachable again');
+retry.status = 'issued';
+for (const id of ['c3c', 'c3d', 'c3e']) fail(retry, id);
+assert.equal(retry.status, 'cancelled', 'after three failed reaches the reviewer is replaced');
+const repl = t.tickets.at(-1);
+assert.notEqual(repl.id, retry.id);
+assert.equal(repl.retryWhy, 'replace');
+assert.equal(t.members['reviewer-code'].status, 'lost');
+assert.deepEqual(engine.route(t, repl), { tool: 'create_session' });
+assert.deepEqual([t.recovery['reviewer-code'].reach, t.recovery['reviewer-code'].replaced], [0, 1]);
+for (let i = 0; i < 3; i++) {
+  repl.retryAt = Date.now() - 1;
+  engine.authorizeHire({ marker: repl.id, tool: 'create_session' });
+  engine.sweep(repl.dispatchedAt + CLAIM_TIMEOUT_MS + 1);
+}
+assert.equal(repl.status, 'failed', 'the replacement could not be reached either');
+assert.ok(t.recovery['reviewer-code'].exhaustedAt);
+let unrec = engine.humanActions([t]).find((h) => h.kind === 'unrecoverable');
+assert.ok(unrec, 'the human is asked');
+assert.equal(unrec.reason, 'its session never started the work');
+assert.equal(engine.decisionError(t, 'shelve'), null, 'an unrecoverable task can be shelved');
+assert.equal(engine.decisionError(t, 'retry-recovery'), null);
+engine.humanDecision({ taskId: t.id, action: 'retry-recovery' });
+assert.equal(t.recovery['reviewer-code'], undefined);
+assert.equal(t.tickets.at(-1).status, 'issued', 'retrying recovery hires a fresh reviewer');
+assert.notEqual(t.tickets.at(-1).id, repl.id);
+assert.equal(engine.humanActions([t]).find((h) => h.kind === 'unrecoverable'), undefined);
+assert.match(engine.decisionError(t, 'retry-recovery'), /Nothing on/);
+// Holding or cancelling the task ends its episodes: resuming starts recovery afresh.
+fail(t.tickets.at(-1), 'c3f');
+assert.equal(t.recovery['reviewer-code'].reach, 1);
+engine.humanDecision({ taskId: t.id, action: 'hold' });
+assert.deepEqual(t.recovery, {}, 'a hold ends the episode');
+engine.humanDecision({ taskId: t.id, action: 'resume' });
+fail(t.tickets.at(-1), 'c3g');
+assert.equal(t.recovery['reviewer-code'].reach, 1);
+engine.humanDecision({ taskId: t.id, action: 'cancel' });
+assert.deepEqual(t.recovery, {}, 'so does cancelling');
 
 // ---- a hire that is never claimed: a created chat without Grove is named, not a vague timeout ----
 t = task({ steps: [{ kind: 'execute', reviewers: ['code'] }] });
@@ -207,12 +267,13 @@ engine.authorizeHire({ marker: k.id, tool: 'create_session' });
 engine.bindToolCall('c4', k.id);
 engine.dispatchEnded({ toolCallId: 'c4', success: true, link: 'agent-host-session://ahp-session/M?chat=code' });
 engine.sweep(k.dispatchedAt + CLAIM_TIMEOUT_MS + 1);
-assert.equal(k.failure, 'Grove was not loaded in its new chat, so it never received its brief');
-k = t.tickets.at(-1);
-assert.equal(k.status, 'issued', 'retried as usual');
+assert.equal(k.previousFailure, 'Grove was not loaded in its new chat, so it never received its brief');
+assert.equal(t.members['reviewer-code'].status, 'lost', 'that chat is not used again');
+assert.equal(t.tickets.at(-1), k, 'offered again as the same ticket');
+assert.equal(k.status, 'issued');
 engine.authorizeHire({ marker: k.id, tool: 'create_session' });
 engine.sweep(k.dispatchedAt + CLAIM_TIMEOUT_MS + 1);
-assert.equal(k.failure, 'its session never started the work', 'no chat was created, so Grove is not blamed');
+assert.equal(k.previousFailure, 'its session never started the work', 'no chat was created, so Grove is not blamed');
 
 // ---- shipping ----
 // Deliver a task's work; a code change opens its draft PR first (`draft`: the engineer's last line).

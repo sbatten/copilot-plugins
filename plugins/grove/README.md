@@ -268,6 +268,7 @@ are conveniences for the agents, not a vocabulary you need to learn:
 | want them to continue | `resume` | The engineer carries on with its step, or the missing reviewers get their work again, in the same chats. |
 | ask something about the work | `question` | The engineer finds out what it needs, answers with `grove_answer`, and the Chief brings you the answer. |
 | want to steer a running task | `note` | The engineer (and its reviewers) see your words; nothing stops. |
+| want Grove to try an unreachable session again | `retry-recovery` | Only for an **Unrecoverable** task: its sessions get a fresh budget of attempts and a replacement. |
 | aren't ready to act on something waiting on you | `shelve` | It goes on the **shelf** (see below). |
 | want a shelved task back in your inbox | `unshelve` | It's back exactly where it was. |
 
@@ -460,13 +461,13 @@ you ──► Chief of Staff ──► T1 engineer ── plan · execute · ver
   commits replay the durable decision log on the next board read.
 - **Notification is separate.** Only verified current-engineer links are used.
   Automatic notification has a persisted limit of three attempts per decision/generation,
-  including the one permitted steer-to-queue fallback. Unknown chat ownership
-  stops retries immediately. Application remains successful even if notification
+  including the one permitted steer-to-queue fallback. An unknown chat owner
+  (usually a chat the host hasn't loaded yet) is retried with backoff like any
+  other transient failure. Application remains successful even if notification
   is unavailable; execution (answering, publishing, merging) is separately pending.
-  Grove does not automatically replace an engineer for failed notification.
-  Recovery/replacement requires the human's explicit request through
-  `grove_handoff`. Old conditional recovery notices cannot replace an engineer
-  for a decision already applied.
+  A failed notification alone never replaces an engineer; an engineer is replaced
+  only through the recovery policy below. Old conditional recovery notices cannot
+  replace an engineer for a decision already applied.
 
 Adopting committed task changes from another session also updates the live canvas.
 New engineers and activity changes reach connected viewers without a follow-up
@@ -535,12 +536,29 @@ and decisions from stale writes.
   whenever needed, not only after a host declares the chat gone.
 - `grove_recover` with `note` resumes a prerequisite the engineer has resolved.
   It is not direction to ignore a human hold or silently waive objections.
-- Failed hires are retried up to three times; exhaustion returns recovery to the
-  engineer rather than automatically escalating an operational problem to you.
-  Host message limits still back off for 15 minutes.
-- If an engineer itself is inaccessible, ask the Chief to reach or replace it
-  using native messaging or `grove_handoff`. The replacement keeps the same task,
-  character, checkout, review history and reports.
+- **Transient failures are retried, not escalated.** Each unreachable session
+  (an unknown chat owner, a failed send, a chat that stopped reporting) starts a
+  recovery episode. Grove offers the *same* ticket to the *same* session up to
+  three times with backoff, so a reviewer interrupted by a host refresh
+  continues its review rather than starting over. A reviewer restarted mid-review
+  keeps its ticket and is told to finish it.
+- **Then one replacement.** After three failed attempts Grove replaces the
+  session once (reviewers automatically; engineers through the Chief, who calls
+  `grove_handoff` without asking you). The replacement gets three attempts of
+  its own. Any answer from the session ends the episode.
+- **Then you're told once.** If the replacement can't be reached either, Grove
+  stops retrying and the inbox shows an **Unrecoverable** item. **Retry
+  recovery** gives the task a fresh budget; **Shelve** sets it aside. Holding,
+  shelving or cancelling a task ends its episodes. Host message limits still
+  back off for 15 minutes.
+- **Grove inspects before it repeats.** A late result for a finished ticket is
+  ignored. The full text of each step's submission is kept in
+  `outputs/<task>/<step>-v<n>.md` beside the board, so nothing is lost to the
+  task's clipped copy. Engineers can record `next` and `effects` with
+  `grove_update`; a replacement engineer sees them (and the latest submission)
+  in `grove_next` and checks those effects before repeating them.
+- The replacement keeps the same task, character, checkout, review history and
+  reports.
 - Unresolved review disagreement at the round limits and things agents truly
   cannot perform still come to the human.
 
@@ -703,6 +721,8 @@ The canvas shows the team at work. Your **inbox** lives on the Chief of Staff:
     in the reviewer's new chat. The reason shows until
     the retry starts, even if the reviewer never got a chat.
   - **Stalled tasks:** an engineer that stopped responding.
+  - **Recovery:** a session Grove is reconnecting to (attempt *n* of 3), or one
+    it gave up on. The report's Recovery panel lists the same episodes.
   - **Tracking delays:** the board could not be read or reconciled. The delay
     is visible, polling retries, and independent work can continue. Ordinary
     host tools do not wait for a board read or require tracking repair first.
@@ -808,7 +828,7 @@ skills/grove-review/     # how reviewers review (Grove adds it to every reviewer
 | `grove_create_task` | Chief | Open a task `{ title, goal, kind, destination, criteria?, chiefSession? }`. The first task needs `chiefSession` from the Chief's `get_current_session.openLink`. Pass the returned handoff to native `create_session`; new scratch tasks omit workspace/worktree. |
 | `grove_handoff` | Chief | Recover an engineer: `{ taskId, destination? }`. Returns the replacement's handoff and any native message to tell the previous engineer to stop. Reuses the recorded directory and preserves the task/character/history. Pass paired `forDecision`/`forGeneration` only when supplied by a Grove notice. |
 | `grove_resume` | Fresh Chief | `{ boardId?, chiefSession }`: with human permission, resume an existing board, keep its tasks/engineers, and route notices here. |
-| `grove_record_decision` | Chief | `{ taskId, decision, note?, ship?, errorId? }`: durably apply `approve`, `changes`, `note`, `question`, `hold`, `resume`, `retry`, `merge`, `shelve`, `unshelve`, `acknowledge-error` or `cancel`. Preserve the human's words in `note` (required for changes/note/question). Approval can authorize continuation as well as sign-off; `ship: false` on sign-off skips PR publication. `acknowledge-error` requires `engineerErrorId` from `grove_status` as `errorId`: it quietly dismisses only that session-error occurrence, preserving its original details and acknowledgment in task/report history, without changing approval/shelf state or waking anyone. Tracking/storage, PR-fetch and blocker failures are not dismissed; later session errors remain visible. Successful activity clears session errors automatically; a stale refused clear retries on ordinary polling without another model event, fenced to the same owner and occurrence. Returns state and an optional native notification; no engineer acknowledgement is needed. |
+| `grove_record_decision` | Chief | `{ taskId, decision, note?, ship?, errorId? }`: durably apply `approve`, `changes`, `note`, `question`, `hold`, `resume`, `retry`, `retry-recovery`, `merge`, `shelve`, `unshelve`, `acknowledge-error` or `cancel`. `retry-recovery` gives an Unrecoverable task's sessions a fresh reconnect budget. Preserve the human's words in `note` (required for changes/note/question). Approval can authorize continuation as well as sign-off; `ship: false` on sign-off skips PR publication. `acknowledge-error` requires `engineerErrorId` from `grove_status` as `errorId`: it quietly dismisses only that session-error occurrence, preserving its original details and acknowledgment in task/report history, without changing approval/shelf state or waking anyone. Tracking/storage, PR-fetch and blocker failures are not dismissed; later session errors remain visible. Successful activity clears session errors automatically; a stale refused clear retries on ordinary polling without another model event, fenced to the same owner and occurrence. Returns state and an optional native notification; no engineer acknowledgement is needed. |
 | `grove_cancel_task` | Chief | `{ taskId, reason? }`: cancel on the board. Notify/stop sessions with native tools; Grove does not deny their tools or undo running actions. |
 | `grove_status` | Chief, engineer, observer session | `{ taskId? }`: show stages, kinds, engineer/reviewer links, votes, history, task/session errors and what's waiting on the human. |
 | `grove_plan_steps` | engineer | `{ template?, steps?: [{ kind, title?, brief?, reviewers? }], replace?, redoFrom?, note? }`. Add steps or redo finished non-shipping work. `replace` drops pending steps; with `note`, it can also replace active work to recover or follow human direction. History remains. Returns what to do next. |
@@ -817,7 +837,7 @@ skills/grove-review/     # how reviewers review (Grove adds it to every reviewer
 | `grove_recover` | engineer | `{ reviewer?, note }`: replace an inaccessible reviewer, or resume a prerequisite the engineer has resolved. Explain the failure/recovery in `note`; findings and discussion remain. Returns the next work/hires. No extra Grove repair consent is needed. |
 | `grove_submit` | engineer | `{ step, output, reviewers?: string[], note? }`: record a step's output and return any reviewer hires. With `note`, reconcile a submission while tracking still shows review/waiting. Override `reviewers` with an explanation when adapting the review; an empty list skips it under explicit human direction. |
 | `grove_deliver` | engineer | `{ summary, ask?, decisions?, ship?, complete? }`: write the report and return its path and Chief notification. Normally code work gets a draft PR and sign-off; a PR under watch hands back to watching. `ship: false` disables PR automation for this delivery. `complete: true` finishes an already-authorized outcome without another sign-off or automatic draft step; explain the existing authorization/deviation in `decisions`. |
-| `grove_update` | engineer | Post progress on the task's status board: `{ text }`. |
+| `grove_update` | engineer | Post progress on the task's status board: `{ text, next?, effects? }`. `next` (what you'll do next) and `effects` (changes made outside Grove, such as a push or a PR) are hand-over notes for a replacement engineer. |
 | `grove_blocked` | engineer | Stop the task until the human does something only they can: `{ need, reason? }`. Returns the message to send the Chief. |
 | `grove_answer` | engineer | Answer the human's open question: `{ text }`. Returns the message to send the Chief. |
 
@@ -870,9 +890,9 @@ Run these commands from `plugins/grove/`:
 ```sh
 node --test tests/*.test.mjs                             # all process, control, relay, report and scene regressions
 node tests/process.test.mjs                              # process engine, roles, relays (simulated sessions)
-node tests/control.test.mjs                             # durable human decisions, stale writes and notification
+node tests/control.test.mjs                              # durable human decisions, stale writes, notification and engineer recovery
 node tests/canvas-refresh.test.mjs                       # external task adoption reaches SSE viewers without chief turns
-node tests/engine.test.mjs                               # engine alone: hold, blockers, questions, shipping, limits
+node tests/engine.test.mjs                               # engine alone: hold, blockers, questions, shipping, limits, recovery episodes
 node tests/placement.test.mjs                            # native routing, truthful activity, non-blocking tracking recovery
 node tests/agents.test.mjs                               # plugin manifest, component paths, agent/skill front matter
 node tests/scene.test.mjs                                # team tents: pitch, rest inside, strike

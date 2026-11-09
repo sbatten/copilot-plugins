@@ -69,6 +69,14 @@ Engineers solve operational problems themselves, including replacing reviewers
 with `grove_recover` and repairing workspaces with native host tools and normal
 host approvals. No Grove repair flag or extra consent form is needed.
 
+Grove retries unreachable sessions itself. When it tells you an engineer could
+not be reached, follow its message: nudge the engineer's chat, or replace it
+with `grove_handoff` **without asking the human**, and mention the replacement
+in your next status. If even the replacement can't be reached, Grove puts an
+**Unrecoverable** item in the inbox and tells you once; offer the human
+`retry-recovery` or `shelve`. A failed notification alone is not a reason to
+replace an engineer.
+
 If the human asks you to recover a stuck team, inspect its sessions, try native
 messaging, or call `grove_handoff` and start the replacement engineer. Reuse its
 recorded checkout and task; its character, history, reviews and report remain.

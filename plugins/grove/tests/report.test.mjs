@@ -176,6 +176,16 @@ top = section(renderReport({ ...task, stage: 'on-hold', delivery: null, pause: {
 assert.match(top, /<p class="kicker">Where it stands<\/p><h2 class="action">On hold until you resume it<\/h2><p>You said: &quot;until Monday&quot;\./);
 assert.doesNotMatch(top, /class="how"/, 'no answer instructions when nothing is asked');
 top = section(renderReport({ ...task, stage: 'working', delivery: null, steps: [{ ...task.steps[0], status: 'working' }], updates: [{ at, text: 'Halfway.' }] }, { root }), 'top');
+// Hand-over notes show with their update, and sessions Grove is trying to reach get a Recovery panel.
+{
+  const members = { ...task.members, 'reviewer-security': { title: 'Thornback · Security reviewer' } };
+  const r = renderReport({ ...task, stage: 'working', delivery: null, members, updates: [{ at, text: 'Halfway.', next: 'Open the PR.', effects: 'Pushed fix/x.' }],
+    recovery: { 'reviewer-security': { since: at, reason: 'Unknown chat owner', reach: 2, replaced: 1, exhaustedAt: null } } }, { root });
+  assert.match(section(r, 'updates'), /Next:<\/span> Open the PR\.[\s\S]*Done outside Grove:<\/span> Pushed fix\/x\./);
+  assert.match(section(r, 'recovery'), /Thornback · Security reviewer[\s\S]*Replacement session, reconnecting \(attempt 2 of 3\)\. Unknown chat owner/);
+  assert.match(r, /href="#recovery"/);
+  assert.equal(section(html, 'recovery'), '', 'no panel without an episode');
+}
 assert.match(top, /<h2 class="action">Nothing needed yet<\/h2><p>The engineer is working on S1 · Plan\./);
 assert.match(top, /Latest from the engineer \([^)]*\): Halfway\./);
 
@@ -239,10 +249,10 @@ r = await post('api/inbox/decide', { taskId: 'T9', action: 'complete' });
 assert.equal(r.status, 400);
 assert.match((await r.json()).error, /isn't waiting on you/);
 // Every inbox button reaches Grove through this route.
-for (const action of ['merge', 'shelve', 'unshelve', 'dismiss']) assert.equal((await post('api/inbox/decide', { taskId: 'T1', action })).status, 200, `the inbox can ${action}`);
-assert.deepEqual(proc.decided.slice(1).map(([, a]) => a), ['merge', 'shelve', 'unshelve', 'dismiss']);
+for (const action of ['merge', 'shelve', 'unshelve', 'retry', 'dismiss']) assert.equal((await post('api/inbox/decide', { taskId: 'T1', action })).status, 200, `the inbox can ${action}`);
+assert.deepEqual(proc.decided.slice(1).map(([, a]) => a), ['merge', 'shelve', 'unshelve', 'retry', 'dismiss']);
 const { INBOX_ACTION_NAMES } = await import('../extensions/grove/lib/process/integration.mjs');
-assert.deepEqual([...INBOX_ACTION_NAMES].sort(), ['complete', 'dismiss', 'merge', 'shelve', 'unshelve']);
+assert.deepEqual([...INBOX_ACTION_NAMES].sort(), ['complete', 'dismiss', 'merge', 'retry', 'shelve', 'unshelve']);
 assert.equal((await post('api/inbox/decide', { taskId: 'T1', action: 'approve' })).status, 400);
 assert.equal((await post('api/inbox/decide', { taskId: '../x', action: 'complete' })).status, 400);
 assert.equal((await post('api/inbox/decide', { taskId: 'T1', action: 'dismiss' }, { Origin: 'http://evil.example' })).status, 403, 'cross-origin posts are refused');

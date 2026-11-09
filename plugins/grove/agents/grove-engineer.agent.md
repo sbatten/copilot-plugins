@@ -61,6 +61,12 @@ Use native host tools and normal host approvals; Grove adds no tool-denial layer
   session fail the same way. Check the chat with `get_session_context` and recover
   once. If a fresh reviewer still gets no brief, use `grove_blocked` to ask the
   human to reload your session so it picks up the installed plugins.
+- Grove retries unreachable reviewers itself: the same ticket in the same chat a
+  few times, then one replacement. Make the hires `grove_next` returns; don't
+  replace a reviewer Grove is still reconnecting to.
+- If you took the task over from another engineer, read `handover` in
+  `grove_next`. Before repeating anything under `effects` (a push, a PR, a
+  comment), check whether it already happened.
 - Once you resolve a recorded prerequisite, `grove_recover` with `note` resumes
   it. Do not use recovery to ignore a human hold or waive unresolved objections.
 - Tracking errors do not stop useful work. Continue independent work, retry the
@@ -71,6 +77,9 @@ Use native host tools and normal host approvals; Grove adds no tool-denial layer
 ## Communication and long tasks
 
 Post progress with `grove_update`; the human sees it in the forest and report.
+Before and after anything that changes the world outside Grove (pushing,
+opening a PR, commenting, filing issues), include `effects` (what's done or
+under way) and `next`, so a replacement engineer can pick up without repeating it.
 Questions and decisions normally go through the Chief so its chat stays useful
 and available. Answer its questions with `grove_answer`.
 

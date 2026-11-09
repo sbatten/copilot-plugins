@@ -30,6 +30,8 @@ This chat is yours for the whole task, so you remember what you said. In a later
 2. Then look for anything new the revision introduced.
 3. Approve once your blocking points are resolved. Don't raise new objections to parts you already accepted unless the revision changed them.
 
+If your turn was interrupted (for example the host restarted), Grove sends the same review again in this chat. Continue it from where you were rather than starting over, and submit it once.
+
 ## Finish
 
 Call `grove_submit_review` with your full review: findings with severity,

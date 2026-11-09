@@ -12,7 +12,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promises as fs } from 'node:fs';
 import crypto from 'node:crypto';
-import { KIND_LABELS, STAGE_LABELS, stepLabel, memberTitle, prLine } from './engine.mjs';
+import { KIND_LABELS, STAGE_LABELS, stepLabel, memberTitle, prLine, REACH_LIMIT } from './engine.mjs';
 import { PALETTE } from '../../web/engine/palette.mjs';
 import '../../web/sprites/index.mjs';
 import { SpriteSheet } from '../../web/engine/svg.mjs';
@@ -440,9 +440,22 @@ export function renderReport(task, { root, boardId = '', color: colorName = 'amb
   }
 
   if (task.updates?.length || task.questions?.length) {
-    const ups = task.updates?.length ? `<ol class="log">${[...task.updates].reverse().slice(0, 30).map((u) => `<li><span class="meta">${escapeHtml(when(u.at))}</span> ${inline(u.text, taskDir)}</li>`).join('')}</ol>` : '';
+    const notes = (u) => `${u.next ? `<br><span class="meta">Next:</span> ${inline(u.next, taskDir)}` : ''}${u.effects ? `<br><span class="meta">Done outside Grove:</span> ${inline(u.effects, taskDir)}` : ''}`;
+    const ups = task.updates?.length ? `<ol class="log">${[...task.updates].reverse().slice(0, 30).map((u) => `<li><span class="meta">${escapeHtml(when(u.at))}</span> ${inline(u.text, taskDir)}${notes(u)}</li>`).join('')}</ol>` : '';
     const qs = task.questions?.length ? `<ol class="qa">${task.questions.map((q) => `<li><p class="q">“${inline(q.text, taskDir)}” <span class="meta">${escapeHtml(when(q.at))}</span></p>${q.answer ? `<div class="a doc">${md(q.answer)}</div>` : '<p class="meta">Not answered yet.</p>'}</li>`).join('')}</ol>` : '';
     sections.push(`<section class="panel" id="updates"><h2>${icon('owl')}Updates${qs ? ' and questions' : ''}<span class="sub">From the engineer</span></h2>${qs ? `${qs}${ups ? '<div class="scroll-rule" aria-hidden="true"></div>' : ''}` : ''}${ups}</section>`);
+  }
+
+  // Sessions Grove is trying to reach again, or gave up on (the Activity log has each attempt).
+  const recovering = Object.entries(task.recovery ?? {});
+  if (recovering.length) {
+    const rows = recovering.map(([key, ep]) => {
+      const who = task.members?.[key]?.title ?? key;
+      const state = ep.exhaustedAt ? 'Unrecoverable: Grove stopped retrying; retry recovery from the inbox, or shelve the task'
+        : `${ep.replaced ? 'Replacement session, ' : ''}reconnecting (attempt ${ep.reach} of ${REACH_LIMIT})`;
+      return `<li><span class="who review">${escapeHtml(who)}</span><span>${escapeHtml(state)}. ${escapeHtml(ep.reason)} <span class="meta">since ${escapeHtml(when(ep.since))}</span></span></li>`;
+    });
+    sections.push(`<section class="panel" id="recovery"><h2>${icon('owl')}Recovery<span class="sub">Unreachable sessions</span></h2><ul class="decisions">${rows.join('')}</ul></section>`);
   }
 
   // ---- 6. how it was done ----
@@ -474,6 +487,7 @@ export function renderReport(task, { root, boardId = '', color: colorName = 'amb
     decisionRows.length && ['decisions', 'Decisions'],
     result && ['result', isCode ? 'What the team did' : 'Result'],
     (task.updates?.length || task.questions?.length) && ['updates', 'Updates'],
+    recovering.length && ['recovery', 'Recovery'],
     steps.length && ['steps', 'How it was done'],
     ['log', 'Activity'],
   ].filter(Boolean);
