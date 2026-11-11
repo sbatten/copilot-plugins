@@ -14,7 +14,7 @@
       "name": "engineer",
       "source": "./plugins/engineer/",
       "description": "A canvas-free /engineer workflow with reviewed planning, implementation and verification, parallel subagent reviewers and detailed evidence reports.",
-      "version": "0.2.0"
+      "version": "0.2.1"
     }
   ]
 }
