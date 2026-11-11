@@ -1,0 +1,8 @@
+{
+  "name": "engineer",
+  "version": "0.1.0",
+  "description": "A canvas-free /engineer workflow with reviewed planning, implementation and verification, parallel subagent reviewers and detailed evidence reports.",
+  "repository": "https://github.com/sbatten/copilot-plugins",
+  "agents": "agents/",
+  "skills": "skills/"
+}

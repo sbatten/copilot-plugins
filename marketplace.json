@@ -9,6 +9,12 @@
       "source": "./plugins/grove/",
       "description": "A live pixel-art forest with autonomous engineer sessions, independent reviews and rich reports, coordinated by a Chief of Staff.",
       "version": "0.28.0"
+    },
+    {
+      "name": "engineer",
+      "source": "./plugins/engineer/",
+      "description": "A canvas-free /engineer workflow with reviewed planning, implementation and verification, parallel subagent reviewers and detailed evidence reports.",
+      "version": "0.1.0"
     }
   ]
 }

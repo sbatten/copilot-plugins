@@ -13,11 +13,11 @@ const root = new URL('../', import.meta.url);
 const marketplaceRoot = new URL('../../../', import.meta.url);
 const plugin = JSON.parse(await fs.readFile(new URL('.plugin/plugin.json', root), 'utf8'));
 const marketplace = JSON.parse(await fs.readFile(new URL('marketplace.json', marketplaceRoot), 'utf8'));
-assert.equal(marketplace.plugins.length, 1, 'the marketplace exposes one bundled plugin');
+assert.ok(marketplace.plugins.some((entry) => entry.name === plugin.name), 'the marketplace exposes this plugin');
 await assert.rejects(fs.access(new URL('.plugin/plugin.json', marketplaceRoot)), { code: 'ENOENT' }, 'the marketplace root is not a standalone plugin');
 for (const entry of marketplace.plugins) {
   const source = new URL(entry.source, marketplaceRoot);
-  assert.equal(source.href, root.href, 'the marketplace source resolves to the bundled plugin directory');
+  if (entry.name === plugin.name) assert.equal(source.href, root.href, 'the marketplace source resolves to this plugin directory');
   const manifest = JSON.parse(await fs.readFile(new URL('.plugin/plugin.json', source), 'utf8'));
   for (const key of ['name', 'version', 'description']) {
     assert.equal(entry[key], manifest[key], `marketplace ${key} matches the plugin at its source`);
