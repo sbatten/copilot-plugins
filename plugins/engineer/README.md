@@ -55,11 +55,32 @@ outside the project, containing:
 - `report.json`: the durable structured record used to regenerate it;
 - evidence: actual screenshots, recordings, rendered results and command output.
 
-The HTML report opens directly from disk. It presents the outcome and human ask,
-optional PR link, evidence gallery, acceptance criteria with evidence links,
-decisions and alternatives, full phase outputs, every review round and finding
-response, check results, limitations, process deviations and recovery history.
-Historical failures and superseded phase iterations remain visible.
+The HTML report opens directly from disk, in the reader's light or dark scheme.
+It is written and set like a piece of explanatory journalism (the design
+follows New York Times interactive articles and The Markup's "Show Your Work"
+series): a serif headline and text, sans-serif labels, hairline rules and
+colour only for state. Its two open-licensed typefaces are embedded, so each
+report is about 400 KB before evidence and still loads nothing from the
+network. From the top:
+
+- the status, the title, where the work stands and who reviewed it;
+- what the engineer needs from you, when there is something;
+- the numbers: criteria passing, evidence, checks, reviews and limitations;
+- the summary;
+- each acceptance criterion stated, followed by the evidence that shows it:
+  screenshots side by side and enlarged in place, recordings inline, text
+  transcripts previewed;
+- key decisions;
+- a table of every review gate, every blocking finding with the engineer's
+  response, and each phase's full plan, implementation or verification report
+  and review rounds, folded;
+- checks with their real output, earlier failed attempts folded beneath;
+- the original request and the activity and recovery history;
+- limitations, process deviations and where the record lives.
+
+Plans, reviews and other prose are rendered from a safe Markdown subset.
+Historical failures and superseded or stale phase iterations remain visible
+and are labelled as such.
 
 Generate or refresh a report with:
 
@@ -80,3 +101,7 @@ From the repository root, with Node.js 22 or later:
 ```sh
 node --test plugins/engineer/tests/*.test.mjs
 ```
+
+Changes to the report's markup or stylesheet follow the repository's
+[report design standards](../../.github/skills/engineer-report-design/SKILL.md);
+the tests enforce the mechanical ones.

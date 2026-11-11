@@ -6,6 +6,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
 import { renderReport, validateReport, writeReport } from '../skills/engineer/scripts/render-report.mjs';
+import { reportCss } from '../skills/engineer/scripts/report-style.mjs';
 
 const exec = promisify(execFile);
 const script = new URL('../skills/engineer/scripts/render-report.mjs', import.meta.url);
@@ -62,17 +63,24 @@ test('writes a portable report with evidence, full phase/review history and hone
   const output = await writeReport(input);
   assert.equal(output, path.join(directory, 'report.html'));
   const html = await fs.readFile(output, 'utf8');
-  for (const content of ['Your move', 'Acceptance criteria', 'Key decisions and alternatives',
-    'Checks and results', 'Work and independent review history', 'Process deviations',
-    'Limitations and unresolved concerns', 'Activity and recovery history', 'Full plan output',
-    'Independent security review.', 'Clarified the plan.', 'Initial failure retained.']) {
+  for (const content of ['Nothing is needed from you.', 'What was proved', 'Key decisions', 'How it was reviewed',
+    'The request', 'No limitations or unresolved concerns and no process deviations recorded.',
+    'Full plan output', 'Independent security review.', 'Clarified the plan.', 'Initial failure retained.',
+    '1 earlier attempt', '</b> unanimously after 2 rounds', 'Findings: 1 resolved']) {
     assert.ok(html.includes(content), `report retains ${content}`);
   }
   assert.match(html, /href="evidence\/result%20%26%20output.svg"/);
   assert.match(html, /href="#evidence-E1"/);
   assert.match(html, /href="evidence\/test.log"/);
-  assert.match(html, /<img /);
-  assert.doesNotMatch(html, /<script\b|<iframe\b|<link\b/);
+  assert.match(html, /<a class="frame" href="#view-E1"[^>]*><img /, 'images enlarge without leaving the report');
+  assert.match(html, /<pre[^>]*>Example command transcript: exit 0/, 'text evidence can be read in the report');
+  assert.doesNotMatch(html, /<script\b|<iframe\b|<link\b|url\((?!data:)/, 'nothing is loaded from outside the file');
+  assert.match(html, /font-src data:/);
+  assert.equal(html.match(/@font-face \{ font-family: "(Newsreader|Libre Franklin)"[^}]*url\(data:font\/woff2;base64,/g)?.length, 3,
+    'the typefaces travel inside the report');
+  for (const licence of ['OFL-Newsreader.txt', 'OFL-LibreFranklin.txt']) {
+    await fs.access(new URL(`../skills/engineer/assets/fonts/${licence}`, import.meta.url));
+  }
   assert.deepEqual(JSON.parse(await fs.readFile(input, 'utf8')), report, 'rendering does not modify the source record');
 });
 
@@ -108,6 +116,93 @@ test('rejects false completion while still rendering blocked and in-progress rec
   report.ask = 'Provide access to the test environment.';
   await validateReport(report, directory);
   assert.match(renderReport(report), /Provide access to the test environment/);
+});
+
+test('renders prose as Markdown while keeping command output and long transcripts literal and bounded', async (t) => {
+  const { directory, report } = await fixture(t);
+  report.stages[0].details = [
+    '## Steps', '', '1. First', '2. Run `npm test`', '', '| Option | Why not |', '| --- | --- |', '| Roving focus | Breaks typing |',
+    '', '```', '<b>code</b>', '```', '', 'Match *.js and *.ts files.',
+  ].join('\n');
+  report.checks[0].output = '# not a heading\n**not bold**';
+  await fs.writeFile(path.join(directory, 'evidence', 'test.log'), `${'line of output\n'.repeat(6000)}the very end`);
+  const input = path.join(directory, 'report.json');
+  await fs.writeFile(input, JSON.stringify(report));
+  const html = await fs.readFile(await writeReport(input), 'utf8');
+  assert.match(html, /<h4>Steps<\/h4>\s*<ol><li>First<\/li><li>Run <code>npm test<\/code><\/li><\/ol>/);
+  assert.match(html, /<th>Option<\/th><th>Why not<\/th>.*<td>Roving focus<\/td><td>Breaks typing<\/td>/);
+  assert.match(html, /<pre><code>&lt;b&gt;code&lt;\/b&gt;<\/code><\/pre>/);
+  assert.match(html, /<p>Match \*\.js and \*\.ts files\.<\/p>/, 'globs are not mistaken for emphasis');
+  assert.match(html, /<pre[^>]*># not a heading\n\*\*not bold\*\*<\/pre>/);
+  assert.match(html, /Showing the first 64 KB of 88 KB\. Open the file for the rest\./);
+  assert.ok(!html.includes('the very end') && html.split('line of output').length < 5000,
+    'a long transcript is previewed, not embedded whole');
+});
+
+test('leads with where the work stands, asks before anything else, and reports each review gate', async (t) => {
+  const { directory, report } = await fixture(t);
+  report.criteria[0].text = 'The requested output is **visible**.';
+  const complete = renderReport(report);
+  assert.match(complete, /<p class="deck">The acceptance criterion passes with linked evidence[^<]*Nothing is needed from you\.<\/p>/);
+  assert.doesNotMatch(complete, /id="move"|The engineer asks/);
+  assert.match(complete, /Criterion AC1 · <b class="state pass">Passed<\/b><\/p><p class="statement is-pass">The requested output is <strong>visible<\/strong>\.<\/p>/,
+    'each criterion is stated, then followed by its evidence');
+  assert.ok(complete.indexOf('class="statement') < complete.indexOf('id="evidence-E1"'));
+
+  report.status = 'needs-decision';
+  report.ask = 'Should navigation **wrap** or stop?';
+  report.stages[1].reviews[0] = {
+    ...report.stages[1].reviews[0], verdict: 'changes',
+    findings: [{ id: 'architecture-1', severity: 'blocking', status: 'open', detail: 'Stop at the ends.', response: 'Disagree.' }],
+  };
+  report.stages.push({ ...report.stages[0], iteration: 2 });
+  await validateReport(report, directory);
+  const stuck = renderReport(report);
+  assert.match(stuck, /<h2 class="kicker">Your move · The engineer asks<\/h2>\s*<div class="ask"><p>Should navigation <strong>wrap<\/strong> or stop\?<\/p>/);
+  assert.ok(stuck.indexOf('id="move"') < stuck.indexOf('class="numbers"'), 'the ask comes before the numbers');
+  assert.match(stuck, /round 1: 3 of 4 approve · Findings: 1 blocking open/);
+  assert.match(stuck, /href="#stage-plan-1">Plan 1<\/a>.*?<b class="state off">Superseded<\/b>/);
+  assert.match(stuck, /href="#stage-execute-1">Execute 1<\/a>.*?<b class="state wait">Stale<\/b>/, 'approval that predates a newer plan is not shown as current');
+  assert.match(stuck, /<h3>Blocking findings<\/h3><div class="objection open"><div class="q doc"><p>Stop at the ends\.<\/p>/,
+    'blocking objections are pulled out of the folded record');
+
+  report.status = 'blocked';
+  assert.match(renderReport(report), /<h2 class="kicker">Your move · What is needed<\/h2>/);
+});
+
+test('the stylesheet keeps to the report design standards', () => {
+  const css = reportCss();
+  const [light, dark] = [...css.matchAll(/:root \{([^}]*)\}/g)]
+    .map(([, body]) => Object.fromEntries([...body.matchAll(/--([a-z-]+): ([^;]+);/g)].map(([, name, value]) => [name, value])));
+  const rules = css.replace(/:root \{[^}]*\}/g, '');
+  assert.doesNotMatch(rules, /#[0-9a-f]{3,8}\b|\brgba?\(|\bhsla?\(/i, 'colours are declared once, as tokens');
+  assert.doesNotMatch(rules, /box-shadow|border-radius|gradient\(|backdrop-filter|transition|animation|opacity/,
+    'no cards, pills, decoration or motion');
+  for (const [declaration] of rules.matchAll(/font(?:-family)?:[^;]+;/g)) {
+    assert.match(declaration, /var\(--(serif|sans|mono)\)/, `only the three typefaces: ${declaration}`);
+  }
+  const scale = [12, 13, 14, 15, 16, 18, 20, 22, 24, 27, 30, 38, 44, 58, 62];
+  for (const [, size] of rules.matchAll(/(?:font: [^;]*?|font-size: )(\d+(?:\.\d+)?)px/g)) {
+    assert.ok(scale.includes(Number(size)), `type sizes come from the scale: ${size}px`);
+  }
+  const fills = new Set([...rules.matchAll(/background(?:-color)?: ([^;]+);/g)].map(([, value]) => value));
+  assert.deepEqual([...fills].sort(), ['var(--page)', 'var(--scrim)', 'var(--wash)'],
+    'the only fills are the page, the wash behind verbatim output and the image viewer');
+
+  const luminance = (hex) => {
+    const [r, g, b] = [1, 3, 5].map((at) => parseInt(hex.slice(at, at + 2), 16) / 255)
+      .map((channel) => (channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const contrast = (a, b) => (Math.max(luminance(a), luminance(b)) + 0.05) / (Math.min(luminance(a), luminance(b)) + 0.05);
+  for (const [name, scheme] of [['light', light], ['dark', { ...light, ...dark }]]) {
+    for (const text of ['ink', 'text', 'muted', 'faint', 'link', 'pass', 'fail', 'wait']) {
+      for (const surface of ['page', 'wash']) {
+        assert.ok(contrast(scheme[text], scheme[surface]) >= 4.5, `${name}: ${text} is readable on ${surface}`);
+      }
+    }
+    assert.ok(contrast(scheme.ink, scheme.marker) >= 7, `${name}: highlighted words in the ask are readable`);
+  }
 });
 
 test('requires explicit waivers and preserves earlier objections across review rounds', async (t) => {
@@ -161,11 +256,18 @@ test('escapes untrusted report content and rejects active PR URL schemes', async
   const attack = '<script>alert("x")</script><img src=x onerror=alert(1)>';
   report.title = attack;
   report.evidence[0].caption = attack;
+  report.evidence[0].id = 'E "1"';
+  report.criteria[0].evidence[0] = 'E "1"';
   report.stages[0].reviews[0].details = attack;
+  report.summary = '[safe](https://example.com/a?b=1&c=2) [script](javascript:alert(1)) [data](data:text/html,x)';
   await validateReport(report, directory);
   const html = renderReport(report);
   assert.doesNotMatch(html, /<script>|<img src=x/);
   assert.match(html, /&lt;script&gt;alert\(&quot;x&quot;\)/);
+  assert.match(html, /<a href="https:\/\/example\.com\/a\?b=1&amp;c=2">safe<\/a>/);
+  assert.doesNotMatch(html, /href="(javascript|data):/i, 'only web, mail and file links survive');
+  assert.match(html, /id="evidence-E\.20\.\.22\.1\.22\."/, 'free-text IDs become valid anchors');
+  assert.match(html, /href="#evidence-E\.20\.\.22\.1\.22\."/);
   report.pr = 'javascript:alert(1)';
   await assert.rejects(validateReport(report, directory), /pr protocol/);
 });

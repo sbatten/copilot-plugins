@@ -64,8 +64,16 @@ test('bundled skills and specialist reviewers load without companion files or pi
     }
     assert.match(await fs.readFile(shared, 'utf8'), /VERDICT: APPROVE/);
   }
-  const renderer = await fs.readFile(new URL('skills/engineer/scripts/render-report.mjs', root), 'utf8');
-  for (const [, dependency] of renderer.matchAll(/from '([^']+)'/g)) {
-    assert.ok(dependency.startsWith('node:'), `renderer has no external runtime dependency: ${dependency}`);
+  const scripts = new URL('skills/engineer/scripts/', root);
+  const modules = [new URL('render-report.mjs', scripts)];
+  for (const module of modules) {
+    const source = await fs.readFile(module, 'utf8');
+    for (const [, dependency] of source.matchAll(/from '([^']+)'/g)) {
+      if (dependency.startsWith('node:')) continue;
+      const local = new URL(dependency, module);
+      assert.ok(dependency.startsWith('./') && local.href.startsWith(scripts.href),
+        `renderer has no external runtime dependency: ${dependency}`);
+      if (!modules.some((known) => known.href === local.href)) modules.push(local);
+    }
   }
 });

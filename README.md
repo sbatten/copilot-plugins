@@ -37,7 +37,8 @@ Chief of Staff chat after installing the renamed plugin.
 marketplace.json
 .github/
   skills/
-    grove-sprites/      # repository-only artwork guidance and validator
+    engineer-report-design/   # repository-only design standards for the Engineer report
+    grove-sprites/            # repository-only artwork guidance and validator
 plugins/
   engineer/
     .plugin/plugin.json
@@ -70,7 +71,10 @@ node --check plugins/grove/extensions/grove/extension.mjs
 ```
 
 The [grove-sprites repository skill](.github/skills/grove-sprites/SKILL.md)
-supports maintaining Grove's artwork; it is not shipped with the plugin.
+supports maintaining Grove's artwork, and the
+[engineer-report-design repository skill](.github/skills/engineer-report-design/SKILL.md)
+sets the design standards for the Engineer report; neither is shipped with its
+plugin.
 
 See the [Grove documentation](plugins/grove/README.md) and
 [Engineer documentation](plugins/engineer/README.md) for workflow details.

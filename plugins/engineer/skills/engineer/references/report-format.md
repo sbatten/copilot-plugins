@@ -2,9 +2,26 @@
 
 Keep `report.json`, generated `report.html` and evidence in the same persistent,
 task-specific artifact folder. The renderer uses only Node built-ins and does
-not load code, fonts, scripts or styles from the network. Text is plain text,
-not HTML or Markdown; preserve full prose and transcripts without summarizing
-away the phase or review history.
+not load code, fonts, scripts or styles from the network; its two typefaces are
+embedded in each report (about 400 KB, Latin text; other scripts use system
+fonts). Preserve full prose and transcripts without summarizing away the phase
+or review history.
+
+The report reads like an article: where the work stands, the ask, the numbers
+and the summary, then each acceptance criterion stated and followed by the
+evidence that shows it.
+
+Prose fields (`request`, `summary`, `ask`, criterion text, decisions, stage
+`summary`, `details` and `reviewWaiver`, review `details`, finding `detail` and
+`response`, activity, deviations and limitations) are rendered as a safe
+Markdown subset: headings, lists and task lists, tables, fenced code, quotes,
+links, bold, italic and inline code. Use it: a plan with headings and a table
+of alternatives reads far better than a wall of text. Raw HTML is shown as
+text. Put command output, diffs and diagrams in fenced code blocks so their
+layout survives. One-line fields (criterion text, stage `summary`, activity
+entries) take inline formatting only. Relative links resolve against the
+artifact folder; use absolute paths for files in the checkout. Titles, IDs,
+captions, commands and check output are always shown literally.
 
 Run:
 
@@ -49,12 +66,26 @@ Arrays can initially be empty. IDs must be unique within criteria and evidence.
 ```
 
 - `status`: `in-progress`, `complete`, `blocked`, `needs-decision`, `cancelled`.
+- `title`: the report's headline. Say what the task was in plain words.
+- `summary`: the outcome in a few sentences, as the article's opening. The
+  renderer already states where the work stands and shows the numbers
+  (criteria passing, evidence, checks, reviews, limitations), so do not repeat
+  those.
+- `ask`: exactly `None.` when nothing is needed. Anything else is shown before
+  everything but the headline, in large type, so make it one precise,
+  answerable request. **Bold** the options or the thing you need: bold words
+  in the ask are highlighted.
+- Criterion `text`: one sentence stating the behavior. **Bold** the phrase that
+  states the outcome; it takes the colour of the result (green when the
+  criterion passes, red when it fails, amber when it is not verified).
 - Criterion `result`: `pass`, `fail`, `not-verified`.
-- Criterion `evidence`: evidence IDs, not file paths.
+- Criterion `evidence`: evidence IDs, not file paths, in the order they should
+  be shown.
 - `decisions`, `activity`, `deviations`, `limitations`: arrays of nonempty text.
-  Decisions include alternatives and rationale. Activity includes timestamps,
-  progress, recovery actions and external effects. Deviations quote the user's
-  authorization. Limitations include anything untested or unresolved.
+  Give each decision its own entry, with the alternatives and rationale. Start
+  each activity entry with its date or timestamp (`2026-11-10 18:20: ...`) and
+  cover progress, recovery actions and external effects. Deviations quote the
+  user's authorization. Limitations include anything untested or unresolved.
 
 ## Evidence
 
@@ -67,10 +98,23 @@ Arrays can initially be empty. IDs must be unique within criteria and evidence.
 ```
 
 Files must exist, be nonempty and resolve inside the artifact folder (including
-symlink resolution). Use relative `/`-separated paths. Images (`png`, `jpg`,
-`jpeg`, `gif`, `webp`, `svg`) and video (`mp4`, `webm`) are displayed inline;
-other evidence such as real `.txt`, `.log`, `.json` or `.md` output is linked.
-Keep captions meaningful; the existence of a file is not proof of its claim.
+symlink resolution). Use relative `/`-separated paths. Each item is shown in
+full once, directly under the first criterion that cites it; later criteria
+link back to it. The report shows:
+
+- images (`png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`) inline and enlarged on
+  selection; two or more images for one criterion sit side by side, so cite a
+  before/after or step-by-step sequence in order;
+- video (`mp4`, `webm`) in an inline player;
+- text (`txt`, `log`, `out`, `tap`, `json`, `md`, `csv`, `tsv`, `diff`, `patch`,
+  `yaml`, `yml`, `xml`) as an inline preview of the first 64 KB, so a real
+  transcript can be read without leaving the report;
+- anything else as a link.
+
+Evidence no criterion cites is shown last, as supporting or superseded.
+The caption is printed under the item: say what it shows, not that it exists,
+and do not restate the criterion. The existence of a file is not proof of its
+claim.
 Do not include sensitive output. Keep superseded evidence with honest captions,
 but point passing criteria only at evidence for the current revision.
 
@@ -79,7 +123,12 @@ but point passing criteria only at evidence for the current revision.
 Append a stage for each iteration of `plan`, `execute` or `verify`. Iterations
 increase per phase. Keep old iterations; the latest one is the current gate.
 Re-open dependent phases as new iterations immediately when their approval
-becomes stale; do not leave old approval looking current.
+becomes stale; do not leave old approval looking current. The report lists
+every iteration in a table (approved, in review, review waived, superseded, or
+stale: a current iteration recorded before a newer iteration of an earlier
+phase), shows every blocking finding in the open, and folds each iteration's
+full output and review rounds beneath.
+Keep `summary` to one line; it is the iteration's headline.
 
 ```json
 {
@@ -137,8 +186,10 @@ becomes stale; do not leave old approval looking current.
 ```
 
 Check `result`: `pass`, `fail`, `not-run`. Keep failed attempts, identifying
-later retries by the same command and working directory. Save full transcripts
-as evidence if too long for the check summary. Do not relabel old failures.
+later retries by the same command and working directory: the report shows the
+latest attempt and folds the earlier ones beneath it. `output` is shown
+verbatim in a monospace block, not as Markdown. Save full transcripts as
+evidence if too long for the check summary. Do not relabel old failures.
 
 ## Completion
 

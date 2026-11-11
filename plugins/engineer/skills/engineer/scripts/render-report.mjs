@@ -3,6 +3,11 @@ import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { readPreviews, renderReport } from './report-view.mjs';
+import { loadFonts } from './report-style.mjs';
+
+export { escapeHtml } from './report-markdown.mjs';
+export { renderReport };
 
 const phases = ['plan', 'execute', 'verify'];
 const text = (value, label) => assert.ok(typeof value === 'string' && value.trim(), `${label} must be nonempty text`);
@@ -132,75 +137,6 @@ export async function validateReport(report, directory) {
   }
 }
 
-export function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
-}
-
-const prose = (value) => `<div class="prose">${escapeHtml(value)}</div>`;
-const badge = (value) => `<span class="badge">${escapeHtml(value)}</span>`;
-const paragraphs = (values) => values.length ? values.map(prose).join('') : '<p class="muted">None recorded.</p>';
-const evidenceUrl = (file) => file.split('/').map(encodeURIComponent).join('/');
-
-export function renderReport(report) {
-  const e = escapeHtml;
-  const section = (title, body) => `<section><h2>${title}</h2>${body}</section>`;
-  const gallery = report.evidence.map((item) => {
-    const url = evidenceUrl(item.file);
-    const extension = path.extname(item.file).toLowerCase();
-    const visual = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'].includes(extension)
-      ? `<a href="${url}"><img src="${url}" alt="${e(item.caption)}" loading="lazy"></a>`
-      : ['.mp4', '.webm'].includes(extension) ? `<video controls preload="metadata" src="${url}"></video>` : '';
-    return `<figure id="evidence-${e(item.id)}">${visual}<figcaption><strong>${e(item.id)}</strong> ${e(item.caption)}
-<a href="${url}">Open ${e(item.file)}</a></figcaption></figure>`;
-  }).join('');
-  const criteria = report.criteria.map((criterion) => `<tr><th scope="row">${e(criterion.id)}</th><td>${e(criterion.text)}</td>
-<td>${badge(criterion.result)}</td><td>${criterion.evidence.map((id) => `<a href="#evidence-${e(id)}">${e(id)}</a>`).join(', ') || 'No evidence yet'}</td></tr>`).join('');
-  const stages = report.stages.map((stage, index) => {
-    const superseded = report.stages.slice(index + 1).some((next) => next.phase === stage.phase);
-    const reviews = stage.reviews.map((review) => `<details><summary>${e(review.reviewer)} / round ${review.round} ${badge(review.verdict)}</summary>
-${prose(review.details)}${review.findings.map((finding) => `<article><h4>${e(finding.id)} ${badge(finding.severity)} ${badge(finding.status)}</h4>
-${prose(finding.detail)}<h5>Engineer response</h5>${prose(finding.response)}</article>`).join('')}</details>`).join('');
-    return `<details${superseded ? '' : ' open'}><summary>${e(stage.phase)} / iteration ${stage.iteration}${superseded ? ' (superseded)' : ' (current)'}</summary>
-<h3>${e(stage.summary)}</h3>${prose(stage.details)}<h3>Assigned reviewers</h3>${prose(stage.reviewers.join(', ') || 'None')}
-${stage.reviewWaiver ? `<h3>Authorized review deviation</h3>${prose(stage.reviewWaiver)}` : ''}
-<h3>Review history</h3>${reviews || '<p class="muted">No reviews received.</p>'}</details>`;
-  }).join('');
-  const checks = report.checks.map((check) => `<article><h3><code>${e(check.command)}</code> ${badge(check.result)}</h3>
-<p>Working directory: <code>${e(check.cwd)}</code></p>${prose(check.output)}</article>`).join('');
-  return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' file:; media-src 'self' file:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
-<title>${e(report.title)} - Engineer report</title>
-<style>
-:root{color-scheme:light dark;font:16px/1.6 system-ui,sans-serif;background:#101823;color:#e5edf6}
-body{max-width:1120px;margin:auto;padding:32px 20px}h1,h2,h3{line-height:1.25}h1{font-size:2.4rem}
-header,section{background:#192535;border:1px solid #40536a;border-radius:12px;padding:24px;margin:20px 0}
-header{border-top:5px solid #78c8ee}a{color:#8ed8ff;overflow-wrap:anywhere}code{overflow-wrap:anywhere}
-.badge{display:inline-block;font-size:.8rem;border:1px solid #7790aa;border-radius:20px;padding:2px 10px;margin:2px}
-.prose{white-space:pre-wrap;overflow-wrap:anywhere;margin:12px 0}.muted{color:#afbdcc}
-figure{margin:20px 0;padding:16px;border:1px solid #40536a;border-radius:8px}img,video{max-width:100%;max-height:720px}
-figcaption a{display:block}details{border:1px solid #40536a;border-radius:8px;padding:14px;margin:12px 0}
-summary{cursor:pointer;font-weight:650}article{border-left:3px solid #7790aa;padding-left:16px;margin:18px 0}
-.table{overflow-x:auto}table{width:100%;border-collapse:collapse}th,td{text-align:left;vertical-align:top;padding:12px;border-bottom:1px solid #40536a}
-@media print{body{max-width:none;padding:0}header,section,details{break-inside:avoid}a{color:inherit}}
-</style></head><body>
-<header><p>Engineer / task report ${badge(report.status)}</p><h1>${e(report.title)}</h1>
-${prose(report.summary)}<h2>Your move</h2>${prose(report.ask)}
-<p>Checkout: <code>${e(report.workspace)}</code></p>
-${report.pr ? `<p><a href="${e(report.pr)}">Pull request</a></p>` : ''}
-<p><a href="report.json">Full structured record</a></p></header>
-${section('Evidence', gallery || '<p>No evidence captured yet.</p>')}
-${section('Acceptance criteria', `<div class="table"><table><thead><tr><th>ID</th><th>Criterion</th><th>Result</th><th>Evidence</th></tr></thead><tbody>${criteria}</tbody></table></div>`)}
-${section('Request and scope', prose(report.request))}
-${section('Key decisions and alternatives', paragraphs(report.decisions))}
-${section('Checks and results', checks || '<p>No checks recorded.</p>')}
-${section('Work and independent review history', stages || '<p>No phases recorded.</p>')}
-${section('Process deviations', paragraphs(report.deviations))}
-${section('Limitations and unresolved concerns', paragraphs(report.limitations))}
-${section('Activity and recovery history', paragraphs(report.activity))}
-</body></html>`;
-}
-
 export async function writeReport(input) {
   const source = path.resolve(input);
   assert.equal(path.basename(source), 'report.json', 'input must be named report.json');
@@ -210,7 +146,8 @@ export async function writeReport(input) {
   const output = path.join(directory, 'report.html');
   const temporary = path.join(directory, `.report-${randomUUID()}.tmp`);
   try {
-    await fs.writeFile(temporary, renderReport(report), { encoding: 'utf8', flag: 'wx' });
+    const html = renderReport(report, { directory, previews: await readPreviews(report, directory), fonts: await loadFonts() });
+    await fs.writeFile(temporary, html, { encoding: 'utf8', flag: 'wx' });
     await fs.rename(temporary, output);
   } finally {
     await fs.rm(temporary, { force: true });
