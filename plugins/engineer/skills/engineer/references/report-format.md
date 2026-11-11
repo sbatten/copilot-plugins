@@ -105,11 +105,15 @@ link back to it. The report shows:
 - images (`png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`) inline and enlarged on
   selection; two or more images for one criterion sit side by side, so cite a
   before/after or step-by-step sequence in order;
-- video (`mp4`, `webm`) in an inline player;
+- video (`mp4`) in an inline player;
 - text (`txt`, `log`, `out`, `tap`, `json`, `md`, `csv`, `tsv`, `diff`, `patch`,
   `yaml`, `yml`, `xml`) as an inline preview of the first 64 KB, so a real
   transcript can be read without leaving the report;
 - anything else as a link.
+
+Generate video evidence as MP4 with H.264 encoding and `yuv420p` pixel format
+for broad playback support. If the capture tool outputs non-MP4,
+transcode the recording to MP4 (do not just rename it).
 
 Evidence no criterion cites is shown last, as supporting or superseded.
 The caption is printed under the item: say what it shows, not that it exists,

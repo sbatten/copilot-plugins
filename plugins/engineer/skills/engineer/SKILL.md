@@ -79,7 +79,10 @@ Exercise every acceptance criterion for real, including failure paths. This is
 proof of the requested behavior, not just another test-suite invocation:
 
 - UI changes: capture actual before/after screenshots or recordings using the
-  host's browser or desktop tools, respecting permissions.
+  host's browser or desktop tools, respecting permissions. Save recordings as
+  MP4 (H.264, `yuv420p`), for broad playback support. If a capture tool
+  produces non-MP4, transcode it to MP4 before adding it to the report; changing the
+  extension is not conversion.
 - CLI, library, data or documentation changes: retain real command output,
   rendered results or other directly inspectable evidence. Do not manufacture
   screenshots or successful output. Visual evidence is preferred where useful,
