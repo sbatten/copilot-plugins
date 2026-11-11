@@ -31,7 +31,7 @@ export function reportCss({ fonts = [] } = {}) {
   --serif: "Newsreader", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
   --sans: "Libre Franklin", "Helvetica Neue", Helvetica, Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
-  --col: 600px; --wide: 960px;
+  --col: 960px; --wide: 1280px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -66,9 +66,9 @@ nav.sections a { color: var(--ink); text-decoration: none; }
 nav.sections a:hover { text-decoration: underline; }
 
 /* ---- headline ---- */
-.head { max-width: 948px; margin: 0 auto; padding: 64px 24px 0; text-align: center; }
+.head { max-width: calc(var(--col) + 48px); margin: 0 auto; padding: 64px 24px 0; text-align: center; }
 h1 { margin: 14px 0 18px; color: var(--ink); font: 500 58px/60px var(--serif); letter-spacing: -.012em; overflow-wrap: anywhere; }
-.deck { max-width: 700px; margin: 0 auto; font: 300 24px/32px var(--serif); }
+.deck { max-width: var(--col); margin: 0 auto; font: 300 24px/32px var(--serif); }
 .byline { margin: 26px 0 0; font: 700 15px/20px var(--sans); }
 .byline span { font-weight: 400; }
 .time { margin: 4px 0 0; color: var(--muted); font: 500 13px/18px var(--sans); }
@@ -105,6 +105,13 @@ h2 + .finding { margin-top: 26px; }
 .statement strong { font-weight: 700; }
 .statement.is-pass strong { color: var(--pass); } .statement.is-fail strong { color: var(--fail); } .statement.is-wait strong { color: var(--wait); }
 .statement code { white-space: nowrap; }
+.criterion, h2 + .criterion { margin-top: 0; }
+.criterion > .criterion-summary { padding-top: 16px; padding-bottom: 16px; border-top: 1px solid var(--rule); }
+.criterion-row { display: inline-grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; width: calc(100% - 16px); vertical-align: -2px; }
+.criterion-result { font: 700 13px/30px var(--sans); }
+.criterion-row .statement { margin: 0; font: 400 20px/30px var(--serif); }
+.criterion-row code { white-space: normal; }
+.criterion[open] { padding-bottom: 26px; }
 .also { margin: 14px 0 0; }
 figure { margin: 22px auto 0; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 22px 16px; align-items: start; margin-top: 26px; }
@@ -214,6 +221,8 @@ details[open] > summary { margin-bottom: 14px; }
   h1 { font-size: 38px; line-height: 42px; }
   .deck { font-size: 20px; line-height: 28px; }
   .ask, .statement { font-size: 22px; line-height: 30px; }
+  .criterion-row { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .criterion-row .statement { font-size: 18px; line-height: 28px; }
   .numbers { grid-template-columns: 1fr 1fr; row-gap: 26px; }
   .numbers > div { padding: 0 0 0 16px; }
   .numbers > div:nth-child(odd) { padding-left: 0; border-left: 0; }

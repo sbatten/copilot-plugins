@@ -4,7 +4,7 @@
 //   Your move: the engineer's request, when there is one.
 //   The numbers: criteria, evidence, checks and reviews at a glance.
 //   The summary, then sections:
-//   - What was proved: each acceptance criterion stated, followed by the evidence that shows it.
+//   - What was proved: scannable criterion rows that expand to reveal their evidence.
 //   - Key decisions.
 //   - How it was reviewed: every gate, the blocking objections, and each phase's full record, folded.
 //   - Checks, the original request and the activity log.
@@ -228,7 +228,7 @@ export function renderReport(report, { directory, previews = new Map(), fonts = 
     numbers.push(figure(caveats, '', `<a class="wait" href="#notes">${name}</a>`, 'Listed at the end of this report'));
   }
 
-  // ---- what was proved: each criterion, then the evidence that shows it ----
+  // ---- what was proved: criteria at a glance, evidence on expansion ----
   const lightboxes = [];
   const exhibit = (item, owner) => {
     const url = evidenceUrl(item.file);
@@ -236,7 +236,7 @@ export function renderReport(report, { directory, previews = new Map(), fonts = 
     const kind = kindOf(item.file);
     const preview = previews.get(item.id);
     const others = (linked.get(item.id) ?? []).filter((criterion) => criterion !== owner)
-      .map((criterion) => `<a href="#${e(anchor('criterion', criterion.id))}">${e(criterion.id)}</a>`);
+      .map((criterion) => `${line(criterion.text)} (<a href="#${e(anchor('criterion', criterion.id))}">view criterion</a>)`);
     const caption = `<figcaption>${e(item.caption)}<span class="credit">${e(item.id)} · <a href="${url}">${e(item.file)}</a>${others.length ? ` · also cited by ${others.join(', ')}` : ''}</span></figcaption>`;
     if (kind === 'image') {
       const view = anchor('view', item.id);
@@ -269,7 +269,7 @@ export function renderReport(report, { directory, previews = new Map(), fonts = 
     for (const item of fresh) shown.add(item.id);
     const again = items.filter((item) => !fresh.includes(item))
       .map((item) => `<a href="#${e(anchor('evidence', item.id))}">${e(item.id)}</a> (${e(item.caption)})`);
-    return `<div class="finding" id="${e(anchor('criterion', criterion.id))}">${col(`<p class="kicker">Criterion ${e(criterion.id)} · ${state(RESULTS[criterion.result])}</p><p class="statement is-${tone}">${line(criterion.text)}</p>${items.length ? '' : '<p class="sans also">No evidence linked.</p>'}`)}${exhibits(fresh, criterion)}${again.length ? col(`<p class="sans also">Also shown above by ${series(again)}.</p>`) : ''}</div>`;
+    return `<details class="finding criterion" id="${e(anchor('criterion', criterion.id))}"><summary class="col criterion-summary"><span class="criterion-row"><span class="statement is-${tone}">${line(criterion.text)}</span><span class="criterion-result">${state(RESULTS[criterion.result])}</span></span></summary>${items.length ? '' : col('<p class="sans also">No evidence linked.</p>')}${exhibits(fresh, criterion)}${again.length ? col(`<p class="sans also">Shared evidence: ${series(again)}.</p>`) : ''}</details>`;
   });
   const other = report.evidence.filter((item) => !linked.has(item.id));
   const proof = (findings.length ? findings.join('') : col('<p class="empty">No acceptance criteria recorded yet.</p>')) +

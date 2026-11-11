@@ -49,8 +49,8 @@ Values measured on those pages, and what the report uses:
 | --- | --- | --- |
 | Headline | NYT Cheltenham 55/56, weight 500, `#121212` | Newsreader 58/60, weight 500 |
 | Deck | NYT Cheltenham 23/30, weight 300 | Newsreader 24/32, weight 300 |
-| Body | NYT Imperial 20/30, `#333`, 600px column (The Markup: 18/30.6, 620px) | Newsreader 20/30, 600px column |
-| Statement before a graphic | NYT Cheltenham 24/36, key phrase bold and coloured | Newsreader 27/36, same |
+| Body | NYT Imperial 20/30, `#333`, 600px column (The Markup: 18/30.6, 620px) | Newsreader 20/30, up to 960px column |
+| Criterion statement | NYT Cheltenham 24/36 before a graphic, key phrase bold and coloured | Newsreader 20/30 in a disclosure row (18/28 on small screens), same emphasis |
 | Section heading | NYT Franklin 30/34, weight 700 | Libre Franklin 30/34, weight 700 |
 | Byline | NYT Franklin 15/20, weight 700 | Libre Franklin 15/20, weight 700 |
 | Caption | NYT Franklin 16/22, weight 500, `#333` | Libre Franklin 16/22, weight 500 |
@@ -63,6 +63,13 @@ Franklin; both are open (SIL OFL) and are embedded in every report.
 
 Deliberate departures from the references:
 
+- The report is wider than a newspaper article: narrative, tables and phase
+  records use up to 960px; images, recordings and the numbers row use up to
+  1280px. Engineering plans and evidence need more room than a narrow reading
+  column provides.
+- Criteria are a compact, scannable list of native disclosure rows, with
+  evidence collapsed by default rather than interleaved into the initial view.
+  Readers can survey every outcome before inspecting its proof.
 - Credits and other faint text are darker than the Times' `#999`, to keep
   4.5:1 contrast.
 - There is a dark scheme, because reports are often opened inside a dark
@@ -81,18 +88,35 @@ standard here (and its test) in the same commit; do not work around it.
 
 - Order: status, headline and where the work stands; the engineer's request,
   if any; the numbers; the summary; then **each acceptance criterion as a
-  statement followed by its evidence**; decisions; reviews; checks; the
+  expandable row with its evidence inside**; decisions; reviews; checks; the
   request; activity; limitations.
 - Evidence is shown in full once, under the first criterion that cites it.
   Later criteria link back to it. Evidence no criterion cites comes last,
   labelled as supporting or superseded.
-- Text is set in a 600px column. Only images, recordings and the numbers row
-  use the 960px measure.
+- Each criterion's full readable statement and explicit Passed / Failed /
+  Not verified result remain visible in its summary. Evidence starts collapsed;
+  clicking or keyboard-activating the summary expands it. Long statements wrap
+  rather than truncate, with the result below the statement on small screens.
+  IDs are internal keys for anchors and evidence mapping, not visible labels;
+  related-criterion references use their human descriptions. Disclosure markers
+  inherit the same small sans-serif summary styling as the phase records,
+  not the larger serif statement styling. Optically align them with the
+  statement's first line, not the entire multi-line row: the inline grid sits
+  2px below the shared baseline to lift the smaller sans-serif marker relative
+  to the serif text.
+  Keep native disclosure semantics and ensure fragment links to shared evidence
+  reveal their target inside a collapsed criterion.
+- Text, the headline and deck, tables, transcripts and folded phase/review
+  records use up to 960px of content width. Images, recordings and the numbers
+  row use up to 1280px. Both measures are centred, with 24px side gutters,
+  and shrink to the available viewport width; do not restore a narrower
+  article column inside them.
 - Whole phase outputs and review rounds are folded; the review table and every
   blocking finding are not.
 
-*Why:* the reader should be able to check any claim without hunting for its
-proof, and should never have to open a fold to learn that something is wrong.
+*Why:* the reader can scan the entire criteria set without scrolling through
+proof, then inspect any claim in place. Failures and unverified outcomes remain
+visible while their evidence is collapsed; blocking review findings stay open.
 
 ### 2. Three typefaces, each with a job
 
@@ -152,7 +176,9 @@ wrote, so the renderer never has to guess which words matter.
   page. Two or more images for one criterion sit side by side.
 - The caption says what the item shows. The credit line beneath gives its ID,
   its file, and any other criteria that cite it.
-- Images enlarge in place; transcripts are previewed in the text column.
+- After expanding a criterion, images enlarge in place and transcripts are
+  previewed in the text column. Shared-evidence links reveal the owning
+  criterion; returning from the image viewer must still reveal the image.
 
 ### 7. Rules, not boxes
 
@@ -195,6 +221,11 @@ family or a script subset only with a reason.
 
 2. Render a report with evidence, a failed-then-passed check, a multi-round
    review and an ask, and **look at it**: light, dark, and 400px wide.
+   At a 1440px viewport, verify 960px text and 1280px evidence content widths;
+   at 400px, verify 24px gutters and no page-level horizontal overflow.
+   Include ten mixed-result criteria: verify all statements and results are
+   visible with evidence collapsed, keyboard expansion works, and links to
+   shared evidence and back from the image viewer reveal their targets.
 3. Ask of anything new: what do the references do here? If they have no
    answer and a new size, colour, fill or typeface seems necessary, that is a
    change to these standards, not to one section.

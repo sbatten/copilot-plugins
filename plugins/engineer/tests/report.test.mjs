@@ -145,8 +145,8 @@ test('leads with where the work stands, asks before anything else, and reports e
   const complete = renderReport(report);
   assert.match(complete, /<p class="deck">The acceptance criterion passes with linked evidence[^<]*Nothing is needed from you\.<\/p>/);
   assert.doesNotMatch(complete, /id="move"|The engineer asks/);
-  assert.match(complete, /Criterion AC1 · <b class="state pass">Passed<\/b><\/p><p class="statement is-pass">The requested output is <strong>visible<\/strong>\.<\/p>/,
-    'each criterion is stated, then followed by its evidence');
+  assert.match(complete, /<summary class="col criterion-summary"><span class="criterion-row"><span class="statement is-pass">The requested output is <strong>visible<\/strong>\.<\/span><span class="criterion-result"><b class="state pass">Passed<\/b>/,
+    'the collapsed summary states the criterion and its result');
   assert.ok(complete.indexOf('class="statement') < complete.indexOf('id="evidence-E1"'));
 
   report.status = 'needs-decision';
@@ -168,6 +168,37 @@ test('leads with where the work stands, asks before anything else, and reports e
 
   report.status = 'blocked';
   assert.match(renderReport(report), /<h2 class="kicker">Your move · What is needed<\/h2>/);
+});
+
+test('keeps the full criteria set scannable with evidence collapsed and shared evidence linked once', async (t) => {
+  const { directory, report } = await fixture(t);
+  report.status = 'in-progress';
+  const results = ['pass', 'fail', 'not-verified'];
+  const labels = ['Passed', 'Failed', 'Not verified'];
+  report.criteria = Array.from({ length: 10 }, (_, index) => ({
+    id: `AC${index + 1}`, text: `Requested outcome **${index + 1}**.`,
+    result: index === 9 ? 'not-verified' : results[index % results.length],
+    evidence: index === 0 ? ['E1', 'E2'] : index === 9 ? [] : ['E1'],
+  }));
+  await validateReport(report, directory);
+  const html = renderReport(report);
+  const rows = [...html.matchAll(/<details class="finding criterion" id="([^"]+)">([\s\S]*?)<\/details>/g)];
+  assert.equal(rows.length, 10, 'every criterion has a closed disclosure');
+  for (const [index, [, id, body]] of rows.entries()) {
+    assert.equal(id, `criterion-AC${index + 1}`);
+    const summary = /^<summary[^>]*>([\s\S]*?)<\/summary>/.exec(body)?.[1];
+    assert.ok(summary, 'the summary is the first child for native keyboard interaction');
+    assert.doesNotMatch(summary, /\bAC\d+\b/, 'internal criterion IDs do not clutter the visible summary');
+    assert.ok(summary.includes(`Requested outcome <strong>${index + 1}</strong>.`));
+    assert.ok(summary.includes(labels[results.indexOf(report.criteria[index].result)]), 'results are visible without expanding');
+    assert.doesNotMatch(summary, /<figure|<img|<video|<pre/, 'evidence never crowds the collapsed row');
+  }
+  assert.equal(html.match(/<figure id="evidence-E1"/g)?.length, 1, 'shared evidence is rendered once');
+  assert.match(html, /Requested outcome <strong>2<\/strong>\. \(<a href="#criterion-AC2">view criterion<\/a>\)/,
+    'related criteria use human descriptions while retaining stable anchor links');
+  assert.match(rows[1][2], /Shared evidence: <a href="#evidence-E1">E1<\/a>/);
+  assert.match(rows[9][2], /No evidence linked\./);
+  assert.doesNotMatch(html, /<script\b/, 'disclosures and fragment links work without scripts');
 });
 
 test('the stylesheet keeps to the report design standards', () => {

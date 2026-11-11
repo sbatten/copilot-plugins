@@ -8,8 +8,15 @@ fonts). Preserve full prose and transcripts without summarizing away the phase
 or review history.
 
 The report reads like an article: where the work stands, the ask, the numbers
-and the summary, then each acceptance criterion stated and followed by the
-evidence that shows it.
+and the summary, then a scannable list of acceptance criteria. Each row shows
+the criterion's full text and its Passed, Failed or Not verified result, with
+evidence collapsed by default. Click or keyboard-activate a row to inspect
+its evidence without losing the criteria overview.
+
+The layout is deliberately wider than a newspaper article: text, tables,
+transcripts and phase/review records use up to 960px of content width; visual
+evidence and the numbers row use up to 1280px. Both are centred with 24px side
+gutters and shrink to fit smaller viewports.
 
 Prose fields (`request`, `summary`, `ask`, criterion text, decisions, stage
 `summary`, `details` and `reviewWaiver`, review `details`, finding `detail` and
@@ -77,7 +84,9 @@ Arrays can initially be empty. IDs must be unique within criteria and evidence.
   in the ask are highlighted.
 - Criterion `text`: one sentence stating the behavior. **Bold** the phrase that
   states the outcome; it takes the colour of the result (green when the
-  criterion passes, red when it fails, amber when it is not verified).
+  criterion passes, red when it fails, amber when it is not verified). This
+  human description labels the expandable row; criterion IDs remain internal
+  keys for anchors and evidence mapping, not visible row labels.
 - Criterion `result`: `pass`, `fail`, `not-verified`.
 - Criterion `evidence`: evidence IDs, not file paths, in the order they should
   be shown.
@@ -99,8 +108,9 @@ Arrays can initially be empty. IDs must be unique within criteria and evidence.
 
 Files must exist, be nonempty and resolve inside the artifact folder (including
 symlink resolution). Use relative `/`-separated paths. Each item is shown in
-full once, directly under the first criterion that cites it; later criteria
-link back to it. The report shows:
+full once, inside the expandable row of the first criterion that cites it;
+later criteria link back to it, revealing the shared evidence when followed.
+Expanding a row shows:
 
 - images (`png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`) inline and enlarged on
   selection; two or more images for one criterion sit side by side, so cite a

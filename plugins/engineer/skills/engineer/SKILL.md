@@ -39,6 +39,9 @@ invoke session-creation or session-messaging tools to run this workflow.
    Register the HTML file with the host's artifact tool when available, using
    its absolute file URI. Otherwise link its absolute path in chat. Keep the
    JSON and evidence beside it so the report works from disk without a server.
+   Keep the renderer's wide, responsive layout for prose, tables and phase
+   records; do not add narrow article-column wrappers or manual line breaks
+   to constrain their width.
 
 ## 1. Plan, then review
 
@@ -89,6 +92,9 @@ proof of the requested behavior, not just another test-suite invocation:
   not a substitute for checking the behavior.
 - Map each criterion to named evidence files, a caption and a pass/fail result.
   Record environmental limits and anything not exercised as **not-verified**.
+  Write each criterion as a distinct, readable outcome: the report shows its
+  full text and result in a collapsed row, with evidence revealed on expansion.
+  Keep IDs as internal mapping keys; do not repeat them in the criterion text.
 
 Do not edit project source during verification. If it fails, return to execute,
 fix the cause, repeat implementation review, and capture fresh evidence. Mark

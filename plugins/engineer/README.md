@@ -59,7 +59,10 @@ The HTML report opens directly from disk, in the reader's light or dark scheme.
 It is written and set like a piece of explanatory journalism (the design
 follows New York Times interactive articles and The Markup's "Show Your Work"
 series): a serif headline and text, sans-serif labels, hairline rules and
-colour only for state. Its two open-licensed typefaces are embedded, so each
+colour only for state. Unlike a narrow newspaper column, text, tables and
+phase records use up to 960px, while visual evidence and the numbers row use
+up to 1280px. Both widths shrink to fit the viewport with 24px side gutters.
+Its two open-licensed typefaces are embedded, so each
 report is about 400 KB before evidence and still loads nothing from the
 network. From the top:
 
@@ -67,9 +70,12 @@ network. From the top:
 - what the engineer needs from you, when there is something;
 - the numbers: criteria passing, evidence, checks, reviews and limitations;
 - the summary;
-- each acceptance criterion stated, followed by the evidence that shows it:
-  screenshots side by side and enlarged in place, recordings inline, text
-  transcripts previewed;
+- a scannable list of acceptance criteria: each collapsed row shows the full
+  criterion and its Passed, Failed or Not verified result. Click or
+  keyboard-activate a row to reveal its evidence: screenshots side by side and
+  enlarged in place, recordings inline, text transcripts previewed. Shared
+  evidence is shown once, with links from other criteria. Descriptions lead;
+  internal criterion IDs are not shown as labels;
 - key decisions;
 - a table of every review gate, every blocking finding with the engineer's
   response, and each phase's full plan, implementation or verification report
