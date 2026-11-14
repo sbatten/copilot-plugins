@@ -57,8 +57,9 @@ execute without guessing:
 - verification for each criterion, including edge cases, regression checks and
   the screenshots, recordings or real command output that will prove it.
 
-Save the full plan in the report. Review it with **architecture, security and
-tests** subagents in parallel. Do not implement until the gate passes.
+Save the full plan in the report. Review it with **architecture, security,
+performance and tests** subagents in parallel. Do not implement until the gate
+passes.
 
 ## 2. Execute, then review
 
@@ -68,7 +69,7 @@ smallest relevant builds, tests and lint checks; record exact commands, working
 directory, exit status, outcomes and transcript evidence, including failures.
 
 Report the actual changes, behavior, diff scope, checks and anything unfinished.
-Review the implementation with **architecture, security, code and tests**
+Review the implementation with **architecture, security, performance, code and tests**
 subagents in parallel. Reviewers inspect the actual worktree, including relevant
 untracked files and any pre-existing edits, not merely your summary. Do not move
 to verification until the gate passes.
@@ -113,10 +114,11 @@ Use the bundled specialist agent matching each focus:
 | --- | --- |
 | Architecture | `engineer-reviewer-architecture` |
 | Security | `engineer-reviewer-security` |
+| Performance | `engineer-reviewer-performance` |
 | Code | `engineer-reviewer-code` |
 | Tests | `engineer-reviewer-tests` |
 
-All four load the [engineer-review skill](../engineer-review/SKILL.md) for the
+All five load the [engineer-review skill](../engineer-review/SKILL.md) for the
 shared inspection, findings, revision and verdict protocol. Read it before
 dispatch, and resolve its installed absolute path for reviewer assignments.
 Discover the host's native subagent tool if needed. Launch all reviewers for a

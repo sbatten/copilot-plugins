@@ -17,16 +17,22 @@ The current chat owns the task, with independent reviewer subagents:
 
 | Phase | Work | Parallel review focuses |
 | --- | --- | --- |
-| Plan | Investigate; define scope, steps, risks, criteria and verification | Architecture, security, tests |
-| Execute | Implement the approved plan; run relevant checks | Architecture, security, code, tests |
+| Plan | Investigate; define scope, steps, risks, criteria and verification | Architecture, security, performance, tests |
+| Execute | Implement the approved plan; run relevant checks | Architecture, security, performance, code, tests |
 | Verify | Exercise each criterion; capture real evidence | Tests (plus specialists when useful) |
 
 Each focus has a thin specialist agent: `engineer-reviewer-architecture`,
-`engineer-reviewer-security`, `engineer-reviewer-code` and
-`engineer-reviewer-tests`. All four load the shared
+`engineer-reviewer-security`, `engineer-reviewer-performance`,
+`engineer-reviewer-code` and `engineer-reviewer-tests`. All five load the shared
 [engineer-review skill](skills/engineer-review/SKILL.md) for inspection rules,
 finding IDs, revision handling and verdicts. Role-specific expertise stays in
 the agents; the shared protocol has one source of truth.
+
+The performance reviewer traces affected paths in the actual codebase for
+rendering/layout costs, event handling, IPC payloads, network and storage load,
+computation, memory and other relevant bottlenecks. Findings distinguish measured
+impact from code-supported risks, with targeted verification for material
+concerns rather than speculative micro-optimization.
 
 The engineer launches the assigned specialists concurrently for each gate using
 the host's native subagent facility. They do not create subsessions or change

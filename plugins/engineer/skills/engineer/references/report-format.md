@@ -150,7 +150,7 @@ Keep `summary` to one line; it is the iteration's headline.
   "iteration": 1,
   "summary": "What this phase produced.",
   "details": "Full plan, implementation output or verification report.",
-  "reviewers": ["architecture", "security", "tests"],
+  "reviewers": ["architecture", "security", "performance", "tests"],
   "reviews": [
     {
       "reviewer": "architecture",
@@ -174,8 +174,9 @@ Keep `summary` to one line; it is the iteration's headline.
 - `verdict`: `approve`, `changes`, `blocked`.
 - `reviewers`: the assigned focuses for this gate, declared before launching
   agents. Every assigned reviewer must return approval; a missing result cannot
-  disappear from the gate. Defaults are architecture/security/tests for plan,
-  architecture/security/code/tests for execute, and tests for verify.
+  disappear from the gate. Defaults are architecture/security/performance/tests
+  for plan, architecture/security/performance/code/tests for execute, and tests
+  for verify.
 - Finding `severity`: `blocking`, `non-blocking`; `status`: `open`, `resolved`.
 - Append every response and round. Within an iteration, each reviewer's rounds
   strictly increase. Repeat prior findings with the same ID and updated

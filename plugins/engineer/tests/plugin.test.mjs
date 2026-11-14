@@ -25,7 +25,7 @@ test('bundled skills and specialist reviewers load without companion files or pi
   const shared = new URL('skills/engineer-review/SKILL.md', root);
   const agentsDir = new URL('agents/', root);
   const agentFiles = (await fs.readdir(agentsDir)).filter((file) => file.endsWith('.agent.md'));
-  const focuses = ['architecture', 'security', 'code', 'tests'];
+  const focuses = ['architecture', 'security', 'performance', 'code', 'tests'];
   assert.deepEqual(agentFiles.sort(), focuses.map((focus) => `engineer-reviewer-${focus}.agent.md`).sort(),
     'each review focus has its own specialist, with no generic reviewer left behind');
   const agents = agentFiles.map((file) => new URL(file, agentsDir));
@@ -75,5 +75,15 @@ test('bundled skills and specialist reviewers load without companion files or pi
         `renderer has no external runtime dependency: ${dependency}`);
       if (!modules.some((known) => known.href === local.href)) modules.push(local);
     }
+  }
+});
+
+test('workflow assigns performance review to planning and implementation gates', async () => {
+  const workflow = await fs.readFile(new URL('skills/engineer/SKILL.md', root), 'utf8');
+  for (const phase of ['1. Plan, then review', '2. Execute, then review']) {
+    const section = workflow.split(`## ${phase}\n`)[1]?.split('\n## ')[0];
+    assert.ok(section, `${phase} exists`);
+    assert.match(section, /Review (?:it|the implementation) with \*\*[^*]*\bperformance\b[^*]*\*\*[\s\S]*?subagents in parallel/,
+      `${phase} dispatches the performance specialist alongside the other reviewers`);
   }
 });

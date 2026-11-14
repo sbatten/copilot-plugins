@@ -118,6 +118,36 @@ test('rejects false completion while still rendering blocked and in-progress rec
   assert.match(renderReport(report), /Provide access to the test environment/);
 });
 
+test('performance reviews participate in plan and execute completion gates and report history', async (t) => {
+  for (const phase of ['plan', 'execute']) {
+    await t.test(phase, async (t) => {
+      const { directory, report } = await fixture(t);
+      const stage = report.stages.find((stage) => stage.phase === phase);
+      stage.reviewers.push('performance');
+      await assert.rejects(validateReport(report, directory), new RegExp(`unanimous ${phase} approval`));
+      const review = {
+        reviewer: 'performance', round: 1, verdict: 'changes',
+        details: 'Bound the event queue under sustained input.',
+        findings: [{
+          id: 'performance-1', severity: 'blocking', status: 'open',
+          detail: 'The event queue grows without backpressure.', response: 'Pending.',
+        }],
+      };
+      stage.reviews.push(review);
+      await assert.rejects(validateReport(report, directory), new RegExp(`unanimous ${phase} approval`));
+      stage.reviews.push({
+        ...review, round: 2, verdict: 'approve', details: 'Queue bounds verified under sustained input.',
+        findings: [{ ...review.findings[0], status: 'resolved', response: 'Added backpressure.' }],
+      });
+      await validateReport(report, directory);
+      const html = renderReport(report);
+      for (const content of ['performance', review.details, 'Queue bounds verified under sustained input.', 'Added backpressure.']) {
+        assert.ok(html.includes(content), `report retains ${content}`);
+      }
+    });
+  }
+});
+
 test('renders prose as Markdown while keeping command output and long transcripts literal and bounded', async (t) => {
   const { directory, report } = await fixture(t);
   report.stages[0].details = [
